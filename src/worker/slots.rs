@@ -42,8 +42,8 @@ pub struct SlotPool {
 #[derive(Debug)]
 pub struct SlotLease {
     index: u16,
-    // Held only for its lock; the lock is released when the file is closed.
-    _file: File,
+    // Held for its lock. Dropping unlocks explicitly; see `Drop`.
+    file: File,
 }
 
 /// Why a slot could not be acquired.
@@ -115,7 +115,7 @@ impl SlotPool {
             let path = self.slot_path(index);
             let file = self.open_slot(&path)?;
             match file.try_lock() {
-                Ok(()) => return Ok(SlotLease { index, _file: file }),
+                Ok(()) => return Ok(SlotLease { index, file }),
                 Err(TryLockError::WouldBlock) => continue,
                 Err(TryLockError::Error(error)) => return Err(SlotError::Io(path, error)),
             }
@@ -166,5 +166,34 @@ impl SlotPool {
 impl SlotLease {
     pub fn index(&self) -> u16 {
         self.index
+    }
+
+    /// The locked slot file. Exposed so tests can duplicate the descriptor and
+    /// reproduce the shared-open-file-description case.
+    #[doc(hidden)]
+    pub fn file_for_test(&self) -> &File {
+        &self.file
+    }
+}
+
+impl Drop for SlotLease {
+    fn drop(&mut self) {
+        // Release explicitly rather than relying on close(2).
+        //
+        // The lock belongs to the open file description, not to our descriptor.
+        // A child forked by another thread while this slot was held shares that
+        // description until it execs and FD_CLOEXEC closes the copy. For as long
+        // as such a child exists, closing our own descriptor leaves the lock in
+        // place and the next caller sees a free slot as busy, so `try_acquire`
+        // reports `Full` while capacity is free. Timon forks and reaps children
+        // continuously, so that window is the normal case, not a rare one.
+        //
+        // Unlocking the description first releases the lock even when a copy of
+        // the descriptor is still open elsewhere. Errors are not actionable here:
+        // the descriptor is closed immediately afterwards either way.
+        #[cfg(unix)]
+        unsafe {
+            libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.file), libc::LOCK_UN);
+        }
     }
 }

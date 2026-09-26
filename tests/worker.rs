@@ -328,6 +328,42 @@ fn slots_limit_concurrency_and_release_on_drop() {
 }
 
 #[test]
+fn a_slot_is_released_even_when_a_forked_child_shares_the_descriptor() {
+    // The lock belongs to the open file description. A child forked by another
+    // thread while the slot was held shares that description until it execs, so
+    // releasing by closing our own descriptor alone would leave the slot locked
+    // and the next caller would see `Full` while the slot is free.
+    //
+    // `dup` shares an open file description exactly the way `fork` does, so it
+    // reproduces that window without depending on process timing.
+    let dir = tempfile::tempdir().unwrap();
+    let pool = SlotPool::new(
+        dir.path(),
+        NonZeroU16::new(1).unwrap(),
+        SlotMode::CreateMissing,
+    );
+
+    let lease = pool.try_acquire().unwrap();
+    let shared = unsafe { libc::dup(std::os::fd::AsRawFd::as_raw_fd(lease.file_for_test())) };
+    assert!(
+        shared >= 0,
+        "dup failed: {}",
+        std::io::Error::last_os_error()
+    );
+
+    drop(lease);
+
+    let reacquired = pool.try_acquire();
+    unsafe { libc::close(shared) };
+
+    assert!(
+        reacquired.is_ok(),
+        "a released slot must be free even while a copy of the descriptor is open, got {:?}",
+        reacquired.err()
+    );
+}
+
+#[test]
 fn create_missing_mode_creates_private_slot_directory() {
     let dir = tempfile::tempdir().unwrap();
     let slot_dir = dir.path().join("nested").join("slots");
