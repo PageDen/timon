@@ -197,3 +197,200 @@ impl Drop for SlotLease {
         }
     }
 }
+
+/// One slot file after provisioning.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ProvisionedSlot {
+    pub path: PathBuf,
+    /// Identifies the file itself. It must not change once anyone can hold a
+    /// lock on it: replacing the file would let a second holder lock the new
+    /// inode while the first still holds the old one, and the limit would be
+    /// quietly doubled.
+    pub inode: u64,
+    /// This run created it. A second run reports `false` for the same slot.
+    pub created: bool,
+    pub mode: u32,
+    pub gid: u32,
+}
+
+/// What an operator provisioned.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ProvisionReport {
+    pub dir: PathBuf,
+    pub dir_mode: u32,
+    pub dir_gid: u32,
+    pub slots: Vec<ProvisionedSlot>,
+    /// Slot files present beyond the requested count. They are left alone:
+    /// removing one while a launcher holds its lock would release a slot that is
+    /// still in use.
+    pub extra_left_in_place: Vec<PathBuf>,
+}
+
+/// Creates the shared slot directory and lock files for a host.
+///
+/// Run once by an operator, as root. Every official launcher on the host then
+/// points at this directory in [`SlotMode::Provisioned`], so one limit covers
+/// every account instead of each getting its own.
+///
+/// Idempotent, and deliberately conservative about what it touches: a missing
+/// file is created, an existing one is left exactly as it is. Re-provisioning
+/// must not disturb a file somebody is holding, which rules out truncating,
+/// replacing or re-creating, and is why this does not reuse the per-user
+/// initialisation that does create files on demand.
+///
+/// The directory is not group-writable, so members can open and lock the files
+/// but cannot unlink, replace or add slots.
+pub fn provision(
+    dir: &Path,
+    slots: NonZeroU16,
+    group: Option<&str>,
+    dir_mode: u32,
+    file_mode: u32,
+) -> Result<ProvisionReport, SlotError> {
+    let gid = match group {
+        Some(name) => Some(group_id(name)?),
+        None => None,
+    };
+
+    if !dir.exists() {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(dir_mode);
+        }
+        builder
+            .create(dir)
+            .map_err(|error| SlotError::Io(dir.to_path_buf(), error))?;
+    }
+    set_mode(dir, dir_mode)?;
+    if let Some(gid) = gid {
+        set_group(dir, gid)?;
+    }
+
+    let pool = SlotPool::new(dir, slots, SlotMode::Provisioned);
+    let mut provisioned = Vec::new();
+    for index in 0..slots.get() {
+        let path = pool.slot_path(index);
+        let created = !path.exists();
+        if created {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(file_mode);
+            }
+            options
+                .open(&path)
+                .map_err(|error| SlotError::Io(path.clone(), error))?;
+        }
+        // Mode and group are corrected either way, so a half-finished earlier run
+        // does not leave a slot nobody can lock. The file itself is untouched.
+        set_mode(&path, file_mode)?;
+        if let Some(gid) = gid {
+            set_group(&path, gid)?;
+        }
+        let meta = std::fs::metadata(&path).map_err(|error| SlotError::Io(path.clone(), error))?;
+        provisioned.push(ProvisionedSlot {
+            path,
+            inode: inode_of(&meta),
+            created,
+            mode: mode_of(&meta),
+            gid: gid_of(&meta),
+        });
+    }
+
+    // A shrink is not applied. Whoever asked for fewer slots can remove the
+    // files deliberately when nothing is running; doing it here would release a
+    // slot out from under a live launcher.
+    let mut extra = Vec::new();
+    for index in slots.get()..=u16::MAX {
+        let path = pool.slot_path(index);
+        if !path.exists() {
+            break;
+        }
+        extra.push(path);
+    }
+
+    let dir_meta =
+        std::fs::metadata(dir).map_err(|error| SlotError::Io(dir.to_path_buf(), error))?;
+    Ok(ProvisionReport {
+        dir: dir.to_path_buf(),
+        dir_mode: mode_of(&dir_meta),
+        dir_gid: gid_of(&dir_meta),
+        slots: provisioned,
+        extra_left_in_place: extra,
+    })
+}
+
+fn set_mode(path: &Path, mode: u32) -> Result<(), SlotError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .map_err(|error| SlotError::Io(path.to_path_buf(), error))?;
+    }
+    Ok(())
+}
+
+/// Sets the group, leaving the owner alone.
+fn set_group(path: &Path, gid: u32) -> Result<(), SlotError> {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| SlotError::Io(path.to_path_buf(), io::Error::other("path contains a NUL")))?;
+    // SAFETY: the path is a valid NUL-terminated C string for the duration of
+    // the call. `-1` as a uid means "leave the owner unchanged".
+    let result = unsafe { libc::chown(c_path.as_ptr(), u32::MAX, gid) };
+    if result != 0 {
+        return Err(SlotError::Io(
+            path.to_path_buf(),
+            io::Error::last_os_error(),
+        ));
+    }
+    Ok(())
+}
+
+fn group_id(name: &str) -> Result<u32, SlotError> {
+    let c_name = std::ffi::CString::new(name).map_err(|_| {
+        SlotError::Io(
+            PathBuf::from(name),
+            io::Error::other("group name contains a NUL"),
+        )
+    })?;
+    // SAFETY: getgrnam returns a pointer into library-owned storage valid until
+    // the next call from this thread; the gid is copied out immediately.
+    let gid = unsafe {
+        let entry = libc::getgrnam(c_name.as_ptr());
+        if entry.is_null() {
+            return Err(SlotError::Io(
+                PathBuf::from(name),
+                io::Error::other(format!("no such group: {name}")),
+            ));
+        }
+        (*entry).gr_gid
+    };
+    Ok(gid)
+}
+
+fn inode_of(meta: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::MetadataExt::ino(meta)
+    }
+}
+
+fn mode_of(meta: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o7777
+    }
+}
+
+fn gid_of(meta: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::MetadataExt::gid(meta)
+    }
+}

@@ -46,6 +46,34 @@ enum Command {
     /// Record reported token usage per account (amendment A1).
     #[command(subcommand)]
     Usage(UsageCommand),
+    /// Operator commands for the host-wide worker slots.
+    #[command(subcommand)]
+    Slots(SlotsCommand),
+}
+
+#[derive(Subcommand)]
+enum SlotsCommand {
+    /// Create the shared slot directory and lock files. Run as root, once per
+    /// host; every official launcher then shares this one limit.
+    Provision(ProvisionArgs),
+}
+
+#[derive(Args)]
+struct ProvisionArgs {
+    #[arg(long)]
+    dir: PathBuf,
+    /// How many workers may run on this host at once, across all accounts.
+    #[arg(long)]
+    slots: NonZeroU16,
+    /// Group allowed to lock the slots. Members can open and lock them; the
+    /// directory stays un-writable by the group so they cannot unlink, replace
+    /// or add one.
+    #[arg(long)]
+    group: Option<String>,
+    #[arg(long, default_value = "750")]
+    dir_mode: String,
+    #[arg(long, default_value = "660")]
+    file_mode: String,
 }
 
 #[derive(Subcommand)]
@@ -58,10 +86,24 @@ enum UsageCommand {
     Query(QueryArgs),
     /// Total recorded usage over a window, grouped by account.
     Report(ReportArgs),
+    /// Deliver events left in this account's spool by an earlier outage.
+    Replay(ReplayArgs),
     /// Take a verified snapshot of the database.
     Backup(BackupArgs),
     /// Put a verified snapshot back in place.
     Restore(RestoreArgs),
+}
+
+#[derive(Args)]
+struct ReplayArgs {
+    #[arg(long)]
+    socket: PathBuf,
+    /// Spool to drain. Defaults to this account's own, as an attempt would use.
+    #[arg(long)]
+    spool: Option<PathBuf>,
+    /// Events to attempt in this pass.
+    #[arg(long, default_value_t = 256)]
+    batch: usize,
 }
 
 #[derive(Args)]
@@ -278,8 +320,32 @@ fn run() -> Result<u8> {
         Command::Lead(command) => (Role::Lead, command),
         Command::Worker(command) => (Role::Worker, command),
         Command::Usage(command) => return usage_command(command),
+        Command::Slots(SlotsCommand::Provision(args)) => return slots_provision(args),
     };
     attempt_run(role, args)
+}
+
+fn slots_provision(args: ProvisionArgs) -> Result<u8> {
+    let octal = |value: &str, what: &str| {
+        u32::from_str_radix(value, 8).with_context(|| format!("--{what} {value} is not octal"))
+    };
+    let report = timon::worker::slots::provision(
+        &args.dir,
+        args.slots,
+        args.group.as_deref(),
+        octal(&args.dir_mode, "dir-mode")?,
+        octal(&args.file_mode, "file-mode")?,
+    )
+    .context("the slots could not be provisioned")?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    if !report.extra_left_in_place.is_empty() {
+        eprintln!(
+            "timon: {} slot file(s) beyond --slots were left in place; remove them deliberately \
+when nothing is running, or a live worker would lose its slot",
+            report.extra_left_in_place.len()
+        );
+    }
+    Ok(0)
 }
 
 fn usage_command(command: UsageCommand) -> Result<u8> {
@@ -292,6 +358,7 @@ fn usage_command(command: UsageCommand) -> Result<u8> {
         UsageCommand::Append(args) => runtime.block_on(usage_append(args)),
         UsageCommand::Query(args) => runtime.block_on(usage_query(args)),
         UsageCommand::Report(args) => runtime.block_on(usage_report(args)),
+        UsageCommand::Replay(args) => runtime.block_on(usage_replay(args)),
         UsageCommand::Backup(args) => usage_backup(args),
         UsageCommand::Restore(args) => usage_restore(args),
     }
@@ -369,6 +436,39 @@ async fn usage_report(args: ReportArgs) -> Result<u8> {
         }
         other => print_response(&other),
     }
+}
+
+async fn usage_replay(args: ReplayArgs) -> Result<u8> {
+    let dir = args
+        .spool
+        .or_else(Spool::resolve)
+        .context("no spool directory: pass --spool or set TIMON_SPOOL_DIR")?;
+    let spool = Spool::open(dir, DEFAULT_MAX_SPOOLED_EVENTS).context("opening the spool")?;
+    let outcome = replay(&args.socket, &spool, args.batch)
+        .await
+        .context("the spool could not be read")?;
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "delivered": outcome.delivered,
+            "already_present": outcome.already_present,
+            "still_pending": outcome.still_pending,
+            "corrupt": outcome.corrupt,
+            "notes": outcome.notes,
+            "gap": spool.read_gap().ok().flatten(),
+        }))?
+    );
+    if outcome.corrupt > 0 {
+        eprintln!(
+            "timon: {} spooled event(s) were unreadable and set aside; those tokens are \
+unknown, not zero",
+            outcome.corrupt
+        );
+    }
+    // Anything still pending means the recorder refused or is unreachable, which
+    // a caller draining a spool needs to notice.
+    Ok(if outcome.still_pending > 0 { 1 } else { 0 })
 }
 
 fn usage_backup(args: BackupArgs) -> Result<u8> {
