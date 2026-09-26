@@ -131,6 +131,71 @@ if grep -q '"type": "receipt"' <<<"$out"; then
   ok "the service still serves other accounts after a bad request"
 else bad "service survived bad request" "$out"; fi
 
+
+# ---------------------------------------------------------------------------
+# Spool and outage behaviour. The daemon takes identity from the connection on
+# every request, replay included, so a spool that changes hands must change
+# owner with it.
+# ---------------------------------------------------------------------------
+
+SPOOL_TAG="spool-$RUN_TAG"
+
+# 13 -- an event produced while the recorder is unreachable is kept, not lost
+as_worker() { # user, spool, run-id, attempt, socket
+  sudo -u "$1" sh -c "
+    rm -rf /home/$1/xspool /home/$1/xatt && mkdir -p /home/$1/xspool /home/$1/xatt
+    chmod 700 /home/$1/xspool
+    echo x | $TIMON worker run --output-dir /home/$1/xatt/a --deadline-secs 20 \
+      --run-id $3 --attempt-id $4 --usage-socket $5 --usage-spool /home/$1/xspool \
+      --usage-source stdout \
+      -- /bin/sh -c 'echo {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1234,\"output_tokens\":56}}'
+  " 2>&1
+}
+
+as_worker "$A" x "$SPOOL_TAG" 1 /nonexistent.sock >/dev/null 2>&1
+spooled=$(sudo sh -c "ls -1 /home/$A/xspool/*.json 2>/dev/null | wc -l")
+if [ "$spooled" = "1" ]; then
+  ok "an event produced during an outage is kept in the account's spool"
+else bad "outage spooling" "found $spooled spooled file(s)"; fi
+
+# 14 -- a copied spool is filed by whoever replays it, not its original owner
+sudo sh -c "
+  rm -rf /home/$B/xspool && mkdir -p /home/$B/xspool && chmod 700 /home/$B/xspool
+  cp /home/$A/xspool/*.json /home/$B/xspool/ 2>/dev/null
+  chown -R $B:$B /home/$B/xspool"
+sudo -u $B "$TIMON" usage replay --socket "$SOCK" --spool "/home/$B/xspool" >/dev/null 2>&1
+owner=$(as $ADMIN usage query --socket "$SOCK" --limit 500 | python3 -c "
+import json,sys
+rows=[r for r in json.load(sys.stdin)['rows'] if r['run_id']=='$SPOOL_TAG']
+print(','.join(str(r['peer_uid']) for r in rows))")
+if [ "$owner" = "$(uid_of $B)" ]; then
+  ok "a copied spool is attributed to whoever replays it, not its original owner"
+else bad "copied spool attribution" "owning uid(s): $owner, expected $(uid_of $B)"; fi
+
+# 15 -- and the original owner can still file its own copy
+sudo -u $A "$TIMON" usage replay --socket "$SOCK" --spool "/home/$A/xspool" >/dev/null 2>&1
+owners=$(as $ADMIN usage query --socket "$SOCK" --limit 500 | python3 -c "
+import json,sys
+rows=[r for r in json.load(sys.stdin)['rows'] if r['run_id']=='$SPOOL_TAG']
+print(','.join(sorted(str(r['peer_uid']) for r in rows)))")
+if [ "$owners" = "$(uid_of $A),$(uid_of $B)" ]; then
+  ok "the same event under two accounts is two rows, neither suppressing the other"
+else bad "uid-scoped rows after a copied replay" "owning uid(s): $owners"; fi
+
+# 16 -- replaying twice must not file the event twice
+out=$(sudo -u $A "$TIMON" usage replay --socket "$SOCK" --spool "/home/$A/xspool" 2>&1)
+count=$(as $ADMIN usage query --socket "$SOCK" --limit 500 | python3 -c "
+import json,sys
+print(len([r for r in json.load(sys.stdin)['rows'] if r['run_id']=='$SPOOL_TAG']))")
+if [ "$count" = "2" ]; then
+  ok "a second replay pass adds nothing"
+else bad "replay idempotence across accounts" "$count row(s) after replaying again"; fi
+
+# 17 -- an account's spool is its own
+if sudo -u $B test -r "/home/$A/xspool" 2>/dev/null; then
+  bad "one account can read another's spool"
+else ok "an account cannot read another account's spool"; fi
+
 echo
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]
