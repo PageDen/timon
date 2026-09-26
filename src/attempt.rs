@@ -11,7 +11,7 @@ use crate::result::{self, ResultStatus};
 use crate::usage::{self, Accumulation, UsageNote, UsageReport, UsageStatus, codex};
 use crate::worker::{WorkerOutcome, WorkerSpec, run_worker};
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::future::Future;
 use std::io::BufReader;
@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Which role an attempt plays.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     /// The strong model that plans, integrates and verifies.

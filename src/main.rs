@@ -7,6 +7,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use timon::attempt::{AttemptSpec, Role, UsageSource, run_attempt};
+use timon::recorder::client::{send as recorder_send, send_line as recorder_send_line};
+use timon::recorder::event::{MAX_REQUEST_BYTES, UsageEvent};
+use timon::recorder::protocol::{Request, Response};
+use timon::recorder::server::{Config as RecorderConfig, serve as serve_recorder};
 use timon::usage::Accumulation;
 use timon::worker::slots::{SlotError, SlotMode, SlotPool};
 use timon::worker::{WorkerLimits, WorkerSpec};
@@ -34,6 +38,62 @@ enum Command {
     /// A cheaper model running one bounded task.
     #[command(subcommand)]
     Worker(AttemptCommand),
+    /// Record reported token usage per account (amendment A1).
+    #[command(subcommand)]
+    Usage(UsageCommand),
+}
+
+#[derive(Subcommand)]
+enum UsageCommand {
+    /// Run the recorder daemon.
+    Daemon(DaemonArgs),
+    /// Send one usage event, read as JSON from stdin.
+    Append(AppendArgs),
+    /// Read recorded usage.
+    Query(QueryArgs),
+}
+
+#[derive(Args)]
+struct DaemonArgs {
+    /// Unix socket to listen on. Its directory must be operator-owned.
+    #[arg(long)]
+    socket: PathBuf,
+    /// SQLite database file. Created if missing.
+    #[arg(long)]
+    database: PathBuf,
+    /// A principal allowed to read every account. Repeatable. This is operator
+    /// policy: it is never inferred from the caller or taken from a payload.
+    #[arg(long = "admin-uid")]
+    admin_uids: Vec<u32>,
+    /// Mode for the socket file. Access is by group, set on the directory.
+    #[arg(long, default_value = "660")]
+    socket_mode: String,
+    #[arg(long, default_value_t = 50)]
+    max_requests_per_second: u32,
+}
+
+#[derive(Args)]
+struct AppendArgs {
+    #[arg(long)]
+    socket: PathBuf,
+}
+
+#[derive(Args)]
+struct QueryArgs {
+    #[arg(long)]
+    socket: PathBuf,
+    /// Read one principal's rows. Allowed only for a configured administrator,
+    /// or when it is the caller's own uid.
+    #[arg(long)]
+    only_uid: Option<u32>,
+    /// Earliest `occurred_at`, in Unix seconds.
+    #[arg(long)]
+    since: Option<i64>,
+    /// Latest `occurred_at`, in Unix seconds.
+    #[arg(long)]
+    until: Option<i64>,
+    #[arg(long)]
+    limit: Option<u32>,
 }
 
 #[derive(Subcommand)]
@@ -129,8 +189,75 @@ fn run() -> Result<u8> {
     let (role, AttemptCommand::Run(args)) = match cli.command {
         Command::Lead(command) => (Role::Lead, command),
         Command::Worker(command) => (Role::Worker, command),
+        Command::Usage(command) => return usage_command(command),
     };
     attempt_run(role, args)
+}
+
+fn usage_command(command: UsageCommand) -> Result<u8> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to start the async runtime")?;
+    match command {
+        UsageCommand::Daemon(args) => runtime.block_on(usage_daemon(args)),
+        UsageCommand::Append(args) => runtime.block_on(usage_append(args)),
+        UsageCommand::Query(args) => runtime.block_on(usage_query(args)),
+    }
+}
+
+async fn usage_daemon(args: DaemonArgs) -> Result<u8> {
+    let mode = u32::from_str_radix(&args.socket_mode, 8)
+        .with_context(|| format!("--socket-mode {} is not octal", args.socket_mode))?;
+    let mut config = RecorderConfig::new(args.socket, args.database);
+    config.admin_uids = args.admin_uids;
+    config.socket_mode = mode;
+    config.max_requests_per_second = args.max_requests_per_second;
+    serve_recorder(config, shutdown_signal()).await?;
+    Ok(0)
+}
+
+async fn usage_append(args: AppendArgs) -> Result<u8> {
+    let mut json = String::new();
+    std::io::stdin()
+        .lock()
+        .take(MAX_REQUEST_BYTES as u64 + 1)
+        .read_to_string(&mut json)
+        .context("failed to read the event from stdin")?;
+    if json.len() > MAX_REQUEST_BYTES {
+        bail!("event exceeds {MAX_REQUEST_BYTES} bytes");
+    }
+    // Parsed only to fail fast on an obviously wrong event. The original text is
+    // what gets sent, so the daemon records exactly what the producer wrote.
+    let event: UsageEvent = serde_json::from_str(&json).context("event is not a usage event")?;
+    event.validate().context("event cannot be recorded")?;
+    let request = serde_json::json!({ "type": "append", "event": serde_json::from_str::<serde_json::Value>(&json)? });
+    let response = recorder_send_line(&args.socket, &request.to_string()).await?;
+    print_response(&response)
+}
+
+async fn usage_query(args: QueryArgs) -> Result<u8> {
+    let response = recorder_send(
+        &args.socket,
+        &Request::Query {
+            since: args.since,
+            until: args.until,
+            only_uid: args.only_uid,
+            limit: args.limit,
+        },
+    )
+    .await?;
+    print_response(&response)
+}
+
+/// Prints the daemon's reply and turns a refusal into a non-zero exit, so a
+/// caller that only checks the status still notices a rejected event.
+fn print_response(response: &Response) -> Result<u8> {
+    println!("{}", serde_json::to_string_pretty(response)?);
+    Ok(match response {
+        Response::Error { .. } => EXIT_ATTEMPT_FAILED,
+        _ => 0,
+    })
 }
 
 fn attempt_run(role: Role, args: RunArgs) -> Result<u8> {
