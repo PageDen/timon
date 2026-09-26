@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use timon::attempt::{AttemptSpec, Role, UsageSource, run_attempt};
 use timon::recorder::client::{send as recorder_send, send_line as recorder_send_line};
+use timon::recorder::db::{RESTORE_CAVEAT, Store, plan_restore, restore};
 use timon::recorder::event::{MAX_REQUEST_BYTES, UsageEvent};
 use timon::recorder::producer::{
     DEFAULT_MAX_SPOOLED_EVENTS, Delivery, Spool, deliver, event_for, replay,
@@ -57,6 +58,41 @@ enum UsageCommand {
     Query(QueryArgs),
     /// Total recorded usage over a window, grouped by account.
     Report(ReportArgs),
+    /// Take a verified snapshot of the database.
+    Backup(BackupArgs),
+    /// Put a verified snapshot back in place.
+    Restore(RestoreArgs),
+}
+
+#[derive(Args)]
+struct BackupArgs {
+    /// The live database. Opened directly, so run this as the service account
+    /// that owns it; a snapshot is safe while the daemon is writing.
+    #[arg(long)]
+    database: PathBuf,
+    /// Directory the dated backup is published into, created mode 0700.
+    #[arg(long)]
+    into: PathBuf,
+    /// Backups to keep. Older ones are removed after a successful publish.
+    #[arg(long, default_value_t = 14)]
+    keep: usize,
+}
+
+#[derive(Args)]
+struct RestoreArgs {
+    /// The backup to put back.
+    #[arg(long)]
+    from: PathBuf,
+    /// The database to replace. The existing file is kept alongside, renamed.
+    #[arg(long)]
+    to: PathBuf,
+    /// Describe what restoring would do, and change nothing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Required to replace an existing database, since a restore discards every
+    /// event acknowledged after the backup was taken.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Args)]
@@ -256,6 +292,8 @@ fn usage_command(command: UsageCommand) -> Result<u8> {
         UsageCommand::Append(args) => runtime.block_on(usage_append(args)),
         UsageCommand::Query(args) => runtime.block_on(usage_query(args)),
         UsageCommand::Report(args) => runtime.block_on(usage_report(args)),
+        UsageCommand::Backup(args) => usage_backup(args),
+        UsageCommand::Restore(args) => usage_restore(args),
     }
 }
 
@@ -331,6 +369,52 @@ async fn usage_report(args: ReportArgs) -> Result<u8> {
         }
         other => print_response(&other),
     }
+}
+
+fn usage_backup(args: BackupArgs) -> Result<u8> {
+    let store = Store::open(&args.database)
+        .with_context(|| format!("opening {}", args.database.display()))?;
+    let record = store
+        .backup(&args.into, args.keep)
+        .context("the backup was not published")?;
+    println!("{}", serde_json::to_string_pretty(&record)?);
+    eprintln!(
+        "timon: backed up {} event(s) to {}; recovery point is row {}",
+        record.events,
+        record.path.display(),
+        record
+            .recovery_point_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "(none)".to_string())
+    );
+    Ok(0)
+}
+
+fn usage_restore(args: RestoreArgs) -> Result<u8> {
+    if args.dry_run {
+        let plan = plan_restore(&args.from, &args.to).context("the backup did not verify")?;
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+        eprintln!("timon: {}", RESTORE_CAVEAT);
+        return Ok(0);
+    }
+    if args.to.exists() && !args.force {
+        // Refuse rather than ask: this discards acknowledged events, and a
+        // prompt is not available when this runs from a timer or a script.
+        bail!(
+            "{} already exists. {} Pass --force to replace it, or --dry-run to see what would change.",
+            args.to.display(),
+            RESTORE_CAVEAT
+        );
+    }
+    let plan = restore(&args.from, &args.to).context("the restore did not complete")?;
+    println!("{}", serde_json::to_string_pretty(&plan)?);
+    eprintln!("timon: {}", RESTORE_CAVEAT);
+    if let Some(lost) = plan.live_rows_not_in_backup
+        && lost > 0
+    {
+        eprintln!("timon: {lost} event(s) present before the restore are not in the backup.");
+    }
+    Ok(0)
 }
 
 /// Prints the daemon's reply and turns a refusal into a non-zero exit, so a

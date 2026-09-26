@@ -1,0 +1,28 @@
+# Takes one verified snapshot. Driven by timon-usage-backup.timer.
+#
+# Runs as the service account that owns the database, and while the daemon is
+# running: VACUUM INTO takes a read transaction, so recording does not stop for
+# a backup. A copy that does not verify is deleted rather than published, so a
+# failed run leaves the previous backup as the newest one.
+
+[Unit]
+Description=Timon usage recorder backup
+Documentation=https://github.com/PageDen/timon
+After=timon-usage.service
+
+[Service]
+Type=oneshot
+User=adaptive-usage
+Group=adaptive-usage
+UMask=0077
+ExecStart=/usr/local/lib/timon/timon usage backup \
+    --database /var/lib/timon-usage/usage.db \
+    --into /var/lib/timon-usage/backups \
+    --keep 14
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/timon-usage
+CapabilityBoundingSet=
+RestrictAddressFamilies=
