@@ -5,7 +5,7 @@
 //! correction is a new row that points at the one it corrects, so a report can
 //! apply it once instead of replacing history.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -538,4 +538,308 @@ impl Store {
             quota_note: SHARED_QUOTA_LABEL.to_string(),
         })
     }
+}
+
+/// A published backup.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct BackupRecord {
+    pub path: PathBuf,
+    pub bytes: u64,
+    /// Rows in the snapshot.
+    pub events: u64,
+    /// Highest row id the snapshot contains. This is the recovery point:
+    /// restoring returns the database to exactly this state and no further.
+    pub recovery_point_id: Option<i64>,
+    pub taken_at: i64,
+    /// Older backups removed to honour the retention bound.
+    pub pruned: Vec<PathBuf>,
+}
+
+/// Why a backup was not published.
+#[derive(Debug)]
+pub enum BackupError {
+    /// The copy was made but did not verify, so nothing was published.
+    Unverified(String),
+    Sql(rusqlite::Error),
+    Io(PathBuf, std::io::Error),
+}
+
+impl std::fmt::Display for BackupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Neutral wording: this is raised both when a fresh copy is
+            // rejected and when an existing file is refused as a restore source,
+            // and "discarded" would be wrong in the second case.
+            BackupError::Unverified(why) => write!(f, "the snapshot did not verify: {why}"),
+            BackupError::Sql(error) => write!(f, "database error: {error}"),
+            BackupError::Io(path, error) => write!(f, "{}: {error}", path.display()),
+        }
+    }
+}
+
+impl std::error::Error for BackupError {}
+
+impl From<rusqlite::Error> for BackupError {
+    fn from(error: rusqlite::Error) -> Self {
+        BackupError::Sql(error)
+    }
+}
+
+/// Prefix of a copy that is not yet a backup.
+const PARTIAL_PREFIX: &str = ".partial-";
+
+impl Store {
+    /// Takes a verified snapshot and publishes it under a dated name.
+    ///
+    /// The copy is written to a temporary name, verified, and only then renamed.
+    /// A run that dies part way through therefore leaves something that is
+    /// visibly not a backup, rather than a short file that looks like one.
+    ///
+    /// `VACUUM INTO` takes a read transaction, so this is safe while the daemon
+    /// is writing. The snapshot is consistent as of some instant during the
+    /// copy; it is not a promise about anything acknowledged afterwards.
+    pub fn backup(&self, into: &Path, keep: usize) -> Result<BackupRecord, BackupError> {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        if !into.exists() {
+            builder
+                .create(into)
+                .map_err(|error| BackupError::Io(into.to_path_buf(), error))?;
+        }
+
+        // Everything committed before the copy starts must be in it. Recorded
+        // first so the check cannot be satisfied by a snapshot that lost rows.
+        let committed_before: Option<i64> = self
+            .conn
+            .query_row("SELECT MAX(id) FROM usage_events", [], |row| row.get(0))
+            .optional()?
+            .flatten();
+
+        let taken_at = now_secs();
+        let temp = into.join(format!(
+            "{PARTIAL_PREFIX}{}-{}.db",
+            std::process::id(),
+            taken_at
+        ));
+        let _ = std::fs::remove_file(&temp);
+        self.conn
+            .execute("VACUUM INTO ?1", params![temp.to_string_lossy()])?;
+        restrict(&temp)?;
+
+        match verify(&temp, committed_before) {
+            Ok((events, recovery_point_id)) => {
+                let published = into.join(format!("usage-{}.db", stamp(taken_at)));
+                std::fs::rename(&temp, &published)
+                    .map_err(|error| BackupError::Io(temp.clone(), error))?;
+                let bytes = std::fs::metadata(&published)
+                    .map(|meta| meta.len())
+                    .unwrap_or_default();
+                Ok(BackupRecord {
+                    path: published,
+                    bytes,
+                    events,
+                    recovery_point_id,
+                    taken_at,
+                    pruned: prune(into, keep)?,
+                })
+            }
+            Err(why) => {
+                // Deleted, not published. A backup nobody can restore is worse
+                // than an obvious absence, because it is trusted.
+                let _ = std::fs::remove_file(&temp);
+                Err(BackupError::Unverified(why))
+            }
+        }
+    }
+}
+
+/// Published backups, newest last.
+pub fn list_backups(dir: &Path) -> Result<Vec<PathBuf>, BackupError> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|error| BackupError::Io(dir.to_path_buf(), error))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| is_published(path))
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
+/// True for a name this module publishes, and false for a copy in progress.
+fn is_published(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.starts_with("usage-") && name.ends_with(".db") && !name.starts_with(PARTIAL_PREFIX)
+        })
+}
+
+/// Checks a copy before it is allowed to become a backup.
+///
+/// Integrity alone is not enough: an empty but structurally valid database
+/// passes it. The dedup key has to be present or a restored database would
+/// accept a replay as a new event, and every row committed before the copy
+/// began has to be there or the snapshot silently lost usage.
+fn verify(path: &Path, committed_before: Option<i64>) -> Result<(u64, Option<i64>), String> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| format!("it could not be opened: {error}"))?;
+
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| format!("integrity_check failed to run: {error}"))?;
+    if integrity != "ok" {
+        return Err(format!("integrity_check said {integrity:?}"));
+    }
+
+    let dedup_key: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'index' AND tbl_name = 'usage_events' AND sql IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("the schema could not be read: {error}"))?;
+    if dedup_key == 0 {
+        return Err("the (peer_uid, client_event_id) unique key is missing".to_string());
+    }
+
+    let events: i64 = conn
+        .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
+        .map_err(|error| format!("usage_events could not be read: {error}"))?;
+    let newest: Option<i64> = conn
+        .query_row("SELECT MAX(id) FROM usage_events", [], |row| row.get(0))
+        .map_err(|error| format!("usage_events could not be read: {error}"))?;
+
+    if let Some(expected) = committed_before {
+        let present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_events WHERE id <= ?1",
+                params![expected],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("usage_events could not be read: {error}"))?;
+        if present == 0 && expected > 0 {
+            return Err("it contains none of the rows committed before the copy".to_string());
+        }
+        if newest.unwrap_or(0) < expected {
+            return Err(format!(
+                "it stops at row {} but row {expected} was committed before the copy began",
+                newest.unwrap_or(0)
+            ));
+        }
+    }
+    Ok((events as u64, newest))
+}
+
+/// Keeps the newest `keep` backups and removes the rest.
+fn prune(dir: &Path, keep: usize) -> Result<Vec<PathBuf>, BackupError> {
+    let mut published = list_backups(dir)?;
+    if published.len() <= keep {
+        return Ok(Vec::new());
+    }
+    let remove = published.len() - keep;
+    let mut pruned = Vec::new();
+    for path in published.drain(..remove) {
+        std::fs::remove_file(&path).map_err(|error| BackupError::Io(path.clone(), error))?;
+        pruned.push(path);
+    }
+    Ok(pruned)
+}
+
+/// What restoring a backup would give you.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct RestorePlan {
+    pub from: PathBuf,
+    pub to: PathBuf,
+    pub events: u64,
+    /// The state the database would be returned to. Anything acknowledged after
+    /// this row is not in the backup and does not come back.
+    pub recovery_point_id: Option<i64>,
+    /// Rows currently in the live database that the backup does not have.
+    pub live_rows_not_in_backup: Option<u64>,
+    pub caveat: String,
+}
+
+/// What a restore is, said plainly wherever one is offered.
+pub const RESTORE_CAVEAT: &str = "Restoring is a recovery-point rollback, not a repair: the \
+database is returned to the state in the backup, and any event acknowledged after that point is \
+gone. It is not evidence that later acknowledged events survived.";
+
+/// Checks a backup and describes what restoring it would do.
+///
+/// Deliberately separate from performing the restore. The number worth seeing
+/// before overwriting anything is how much live data the backup does not have.
+pub fn plan_restore(from: &Path, to: &Path) -> Result<RestorePlan, BackupError> {
+    let (events, recovery_point_id) = verify(from, None).map_err(BackupError::Unverified)?;
+
+    let live_rows_not_in_backup = match (to.exists(), recovery_point_id) {
+        (true, Some(point)) => {
+            Connection::open_with_flags(to, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .ok()
+                .and_then(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM usage_events WHERE id > ?1",
+                        params![point],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .ok()
+                })
+                .map(|count| count as u64)
+        }
+        _ => None,
+    };
+
+    Ok(RestorePlan {
+        from: from.to_path_buf(),
+        to: to.to_path_buf(),
+        events,
+        recovery_point_id,
+        live_rows_not_in_backup,
+        caveat: RESTORE_CAVEAT.to_string(),
+    })
+}
+
+/// Puts a verified backup in place, keeping the database it replaced.
+pub fn restore(from: &Path, to: &Path) -> Result<RestorePlan, BackupError> {
+    let plan = plan_restore(from, to)?;
+    if to.exists() {
+        // Never discard the live database on the strength of a rollback. Its WAL
+        // is left alone: SQLite discards a WAL whose database has been replaced.
+        let aside = to.with_extension(format!("replaced-{}", stamp(now_secs())));
+        std::fs::rename(to, &aside).map_err(|error| BackupError::Io(to.to_path_buf(), error))?;
+    }
+    std::fs::copy(from, to).map_err(|error| BackupError::Io(to.to_path_buf(), error))?;
+    restrict(to)?;
+    Ok(plan)
+}
+
+/// Keeps a file readable only by its owner.
+fn restrict(path: &Path) -> Result<(), BackupError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| BackupError::Io(path.to_path_buf(), error))?;
+    }
+    Ok(())
+}
+
+/// A sortable UTC stamp, so lexical order is chronological order.
+fn stamp(seconds: i64) -> String {
+    crate::recorder::render::utc(seconds).replace([':', '-'], "")
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or_default()
 }

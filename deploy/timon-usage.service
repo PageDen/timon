@@ -1,0 +1,42 @@
+# Reference unit for the A1 usage recorder. Adjust paths and the admin uid.
+#
+# The service account is the only writer of the database. Its primary group is
+# the client group so that the socket it creates is reachable by members, while
+# the database stays 0600 inside a 0700 directory owned by the service user, so
+# group membership grants nothing there.
+#
+# Expects, created by an operator beforehand:
+#   groupadd --system adaptive-users            # the client group
+#   groupadd --system adaptive-usage
+#   useradd --system --gid adaptive-usage --no-create-home \
+#           --shell /usr/sbin/nologin adaptive-usage
+#   install -d -o adaptive-usage -g adaptive-usage -m 0700 /var/lib/timon-usage
+#   usermod -aG adaptive-users <each user>      # takes effect at next login
+
+[Unit]
+Description=Timon per-user usage recorder (A1)
+Documentation=https://github.com/PageDen/timon
+After=network.target
+
+[Service]
+Type=simple
+User=adaptive-usage
+Group=adaptive-users
+UMask=0077
+RuntimeDirectory=timon-usage
+RuntimeDirectoryMode=0750
+ExecStart=/usr/local/lib/timon/timon usage daemon \
+    --socket /run/timon-usage/usage.sock \
+    --database /var/lib/timon-usage/usage.db \
+    --admin-uid 0
+Restart=on-failure
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/timon-usage
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

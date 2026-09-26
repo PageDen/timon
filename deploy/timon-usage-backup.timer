@@ -1,0 +1,15 @@
+# Nightly, with a spread so a fleet does not snapshot in lockstep, and
+# Persistent so a host that was off still takes one when it comes back.
+
+[Unit]
+Description=Nightly Timon usage recorder backup
+Documentation=https://github.com/PageDen/timon
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30m
+Persistent=true
+Unit=timon-usage-backup.service
+
+[Install]
+WantedBy=timers.target
