@@ -13,6 +13,7 @@ use timon::recorder::producer::{
     DEFAULT_MAX_SPOOLED_EVENTS, Delivery, Spool, deliver, event_for, replay,
 };
 use timon::recorder::protocol::{Request, Response};
+use timon::recorder::render;
 use timon::recorder::server::{Config as RecorderConfig, serve as serve_recorder};
 use timon::usage::Accumulation;
 use timon::worker::slots::{SlotError, SlotMode, SlotPool};
@@ -54,6 +55,37 @@ enum UsageCommand {
     Append(AppendArgs),
     /// Read recorded usage.
     Query(QueryArgs),
+    /// Total recorded usage over a window, grouped by account.
+    Report(ReportArgs),
+}
+
+#[derive(Args)]
+struct ReportArgs {
+    #[arg(long)]
+    socket: PathBuf,
+    /// Total one account. Allowed only for a configured administrator, or when
+    /// it is the caller's own uid.
+    #[arg(long)]
+    only_uid: Option<u32>,
+    /// A UTC month (`2026-09`) or day (`2026-09-26`). Boundaries are UTC so the
+    /// same work is never attributed to different days for different readers.
+    #[arg(long, conflicts_with_all = ["since", "until"])]
+    period: Option<String>,
+    /// Earliest `occurred_at`, in Unix seconds.
+    #[arg(long)]
+    since: Option<i64>,
+    /// Latest `occurred_at`, in Unix seconds.
+    #[arg(long)]
+    until: Option<i64>,
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    format: ReportFormat,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ReportFormat {
+    Text,
+    Json,
+    Csv,
 }
 
 #[derive(Args)]
@@ -223,6 +255,7 @@ fn usage_command(command: UsageCommand) -> Result<u8> {
         UsageCommand::Daemon(args) => runtime.block_on(usage_daemon(args)),
         UsageCommand::Append(args) => runtime.block_on(usage_append(args)),
         UsageCommand::Query(args) => runtime.block_on(usage_query(args)),
+        UsageCommand::Report(args) => runtime.block_on(usage_report(args)),
     }
 }
 
@@ -268,6 +301,36 @@ async fn usage_query(args: QueryArgs) -> Result<u8> {
     )
     .await?;
     print_response(&response)
+}
+
+async fn usage_report(args: ReportArgs) -> Result<u8> {
+    let (since, until) = match &args.period {
+        Some(spec) => {
+            let (from, to) = render::period(spec).map_err(|error| anyhow::anyhow!(error))?;
+            (Some(from), Some(to))
+        }
+        None => (args.since, args.until),
+    };
+    let response = recorder_send(
+        &args.socket,
+        &Request::Report {
+            since,
+            until,
+            only_uid: args.only_uid,
+        },
+    )
+    .await?;
+    match response {
+        Response::Report { report } => {
+            match args.format {
+                ReportFormat::Text => print!("{}", render::text(&report)),
+                ReportFormat::Csv => print!("{}", render::csv(&report)),
+                ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+            }
+            Ok(0)
+        }
+        other => print_response(&other),
+    }
 }
 
 /// Prints the daemon's reply and turns a refusal into a non-zero exit, so a

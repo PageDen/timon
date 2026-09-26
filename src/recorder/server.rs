@@ -173,6 +173,26 @@ async fn handle(
     let is_admin = config.admin_uids.contains(&peer_uid);
     match request {
         Request::Append { event } => append(*event, peer_uid, peer_username, store).await,
+        Request::Report {
+            since,
+            until,
+            only_uid,
+        } => {
+            let scope = match resolve_scope(only_uid, peer_uid, is_admin) {
+                Ok(scope) => scope,
+                Err(response) => return response,
+            };
+            let guard = store.lock().await;
+            match guard.report(scope, since, until) {
+                Ok(report) => Response::Report {
+                    report: Box::new(report),
+                },
+                Err(error) => Response::Error {
+                    code: ErrorCode::Storage,
+                    message: error.to_string(),
+                },
+            }
+        }
         Request::Query {
             since,
             until,
@@ -218,6 +238,26 @@ async fn handle(
                 },
             }
         }
+    }
+}
+
+/// Decides which rows a caller may see.
+///
+/// A request for someone else is refused outright. Quietly narrowing it to the
+/// caller's own rows would hand back data under a heading they did not ask for,
+/// which reads like another account's usage.
+fn resolve_scope(only_uid: Option<u32>, peer_uid: u32, is_admin: bool) -> Result<Scope, Response> {
+    match only_uid {
+        None if is_admin => Ok(Scope::Admin { only_uid: None }),
+        None => Ok(Scope::Own(peer_uid)),
+        Some(uid) if is_admin => Ok(Scope::Admin {
+            only_uid: Some(uid),
+        }),
+        Some(uid) if uid == peer_uid => Ok(Scope::Own(peer_uid)),
+        Some(_) => Err(Response::Error {
+            code: ErrorCode::Forbidden,
+            message: "reading another principal requires administrator policy".to_string(),
+        }),
     }
 }
 

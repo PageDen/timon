@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::recorder::db::Totals;
+use crate::recorder::db::{Report, Totals};
 use crate::recorder::event::{StoredEvent, UsageEvent};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -11,6 +11,15 @@ use crate::recorder::event::{StoredEvent, UsageEvent};
 pub enum Request {
     /// Store one event. Identity is taken from the connection.
     Append { event: Box<UsageEvent> },
+    /// Totals a window, grouped by principal. Same authorisation as `Query`.
+    Report {
+        #[serde(default)]
+        since: Option<i64>,
+        #[serde(default)]
+        until: Option<i64>,
+        #[serde(default)]
+        only_uid: Option<u32>,
+    },
     /// Read rows. `only_uid` is honoured for administrators and refused for
     /// everyone else, rather than silently downgraded to the caller's own rows,
     /// so a client never believes it read another principal's data.
@@ -38,6 +47,9 @@ pub enum Response {
         /// Omitted when false, so it must default on the way back in.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         identity_claim_ignored: bool,
+    },
+    Report {
+        report: Box<Report>,
     },
     Rows {
         rows: Vec<StoredEvent>,

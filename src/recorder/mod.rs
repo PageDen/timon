@@ -11,4 +11,5 @@ pub mod db;
 pub mod event;
 pub mod producer;
 pub mod protocol;
+pub mod render;
 pub mod server;
