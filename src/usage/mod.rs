@@ -13,7 +13,7 @@
 
 pub mod codex;
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashSet;
 
 /// Upper bound on recorded notes, so a hostile or broken stream cannot grow
@@ -71,6 +71,30 @@ impl TokenCount {
     }
 }
 
+impl<'de> Deserialize<'de> for TokenCount {
+    /// Accepts a non-negative integer or `null`.
+    ///
+    /// `null` and an absent field mean the producer did not report the number.
+    /// A negative or non-integer count is rejected rather than quietly folded
+    /// into `Unknown`: on the wire that is a producer bug worth surfacing, and
+    /// silently downgrading it would hide a miscount behind a legitimate-looking
+    /// "not reported".
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            None | Some(serde_json::Value::Null) => Ok(TokenCount::Unknown),
+            Some(serde_json::Value::Number(number)) => match number.as_u64() {
+                Some(value) => Ok(TokenCount::Known(value)),
+                None => Err(serde::de::Error::custom(format!(
+                    "token count must be a non-negative integer, got {number}"
+                ))),
+            },
+            Some(other) => Err(serde::de::Error::custom(format!(
+                "token count must be a non-negative integer or null, got {other}"
+            ))),
+        }
+    }
+}
+
 impl Serialize for TokenCount {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
@@ -86,7 +110,8 @@ impl Serialize for TokenCount {
 /// prompt cache, and `reasoning_output` is the part of `output` spent on hidden
 /// reasoning. Both are subsets, so [`TokenUsage::total`] adds only `input` and
 /// `output`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TokenUsage {
     pub input: TokenCount,
     /// Part of `input` served from the provider's prompt cache.
@@ -174,7 +199,7 @@ pub enum Accumulation {
 /// `Complete` describes the *stream*, not the provider's bill. Usage the
 /// harness never emitted — startup prewarm, for one (openai/codex#46975) — is
 /// invisible here by construction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageStatus {
     /// Every turn the stream announced reported its input and output counts.
