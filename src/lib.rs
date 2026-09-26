@@ -6,6 +6,7 @@ compile_error!("Timon supports Unix-like systems only.");
 pub mod admission;
 pub mod attempt;
 pub mod recorder;
+pub mod research;
 pub mod result;
 pub mod usage;
 pub mod worker;
