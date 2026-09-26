@@ -380,3 +380,162 @@ pub struct Totals {
     pub events_with_unknown_usage: u64,
     pub late_events: u64,
 }
+
+/// One principal's totals over a window.
+///
+/// Sums cover only counts the producer actually reported. Events whose usage is
+/// unknown are counted separately rather than folded in as zero, so a total can
+/// never read as complete when part of it is missing.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct PrincipalTotals {
+    pub peer_uid: u32,
+    /// Latest name seen for this uid. Display only; the number is the identity.
+    pub username: Option<String>,
+    /// More than one name has been seen for this uid. A rename is the ordinary
+    /// cause; a recycled uid is the one that would merge two people's history,
+    /// which is why the deployment must not recycle one while records are kept.
+    pub names_seen: u64,
+    pub events: u64,
+    pub total_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// Events the producer could not report usage for. Their tokens are not in
+    /// the sums above and are not zero.
+    pub events_with_unknown_usage: u64,
+    /// Events whose totals are a lower bound.
+    pub events_with_partial_usage: u64,
+    /// Events the daemon received well after they happened.
+    pub late_events: u64,
+    /// Corrections counted once each, in place of what they correct.
+    pub corrections_applied: u64,
+    pub first_occurred_at: Option<i64>,
+    pub last_occurred_at: Option<i64>,
+}
+
+/// Aggregated usage for a window, with the caveats that must travel with it.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct Report {
+    pub since: Option<i64>,
+    pub until: Option<i64>,
+    /// Whose usage this covers. `null` means every principal.
+    pub scope_uid: Option<u32>,
+    pub principals: Vec<PrincipalTotals>,
+    /// Rows left out because a later correction replaces them. Each correction
+    /// is applied once; it is not an additional charge on top of the original.
+    pub superseded_by_corrections: u64,
+    /// Always carried with the numbers so a consumer cannot drop them.
+    pub basis: String,
+    pub quota_note: String,
+}
+
+/// What the numbers are, stated wherever they appear.
+pub const VISIBILITY_LABEL: &str = "For visibility, not billing. These are figures producers \
+reported; an account can under-report, omit, or run a model client directly, so completeness \
+cannot be proven.";
+
+/// What the numbers are not.
+pub const SHARED_QUOTA_LABEL: &str = "Attributions of shared provider quota, not a separate \
+invoice per account.";
+
+impl Store {
+    /// Totals a window, grouped by principal.
+    ///
+    /// Aggregation happens here rather than over fetched rows so a report cannot
+    /// be silently truncated by a row limit and understate someone's usage.
+    pub fn report(
+        &self,
+        scope: Scope,
+        since: Option<i64>,
+        until: Option<i64>,
+    ) -> Result<Report, rusqlite::Error> {
+        let (uid_clause, uid_param): (&str, Option<i64>) = match scope {
+            Scope::Own(uid) => ("AND e.peer_uid = ?1", Some(i64::from(uid))),
+            Scope::Admin {
+                only_uid: Some(uid),
+            } => ("AND e.peer_uid = ?1", Some(i64::from(uid))),
+            Scope::Admin { only_uid: None } => ("", None),
+        };
+        // A row replaced by a correction is excluded, so the correction counts
+        // instead of adding to it. Chains resolve naturally: only the row nobody
+        // corrects survives.
+        let live = format!(
+            r#"
+            FROM usage_events e
+            WHERE NOT EXISTS (SELECT 1 FROM usage_events c WHERE c.corrects = e.id)
+              {uid_clause}
+              AND (?2 IS NULL OR e.occurred_at >= ?2)
+              AND (?3 IS NULL OR e.occurred_at <= ?3)
+            "#
+        );
+        let sql = format!(
+            r#"
+            SELECT e.peer_uid,
+                   (SELECT u.peer_username FROM usage_events u
+                     WHERE u.peer_uid = e.peer_uid ORDER BY u.id DESC LIMIT 1),
+                   COUNT(DISTINCT e.peer_username),
+                   COUNT(*),
+                   COALESCE(SUM(e.total_tokens), 0),
+                   COALESCE(SUM(e.input_tokens), 0),
+                   COALESCE(SUM(e.output_tokens), 0),
+                   SUM(e.total_tokens IS NULL),
+                   SUM(e.usage_status = 'partial'),
+                   SUM(e.late),
+                   SUM(e.corrects IS NOT NULL),
+                   MIN(e.occurred_at),
+                   MAX(e.occurred_at)
+            {live}
+            GROUP BY e.peer_uid
+            ORDER BY e.peer_uid
+            "#
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let principals = statement
+            .query_map(params![uid_param, since, until], |row| {
+                Ok(PrincipalTotals {
+                    peer_uid: row.get::<_, i64>(0)? as u32,
+                    username: row.get(1)?,
+                    names_seen: row.get::<_, i64>(2)? as u64,
+                    events: row.get::<_, i64>(3)? as u64,
+                    total_tokens: row.get::<_, i64>(4)? as u64,
+                    input_tokens: row.get::<_, i64>(5)? as u64,
+                    output_tokens: row.get::<_, i64>(6)? as u64,
+                    events_with_unknown_usage: row.get::<_, i64>(7)? as u64,
+                    events_with_partial_usage: row.get::<_, i64>(8)? as u64,
+                    late_events: row.get::<_, i64>(9)? as u64,
+                    corrections_applied: row.get::<_, i64>(10)? as u64,
+                    first_occurred_at: row.get(11)?,
+                    last_occurred_at: row.get(12)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let superseded_sql = format!(
+            r#"
+            SELECT COUNT(*) FROM usage_events e
+            WHERE EXISTS (SELECT 1 FROM usage_events c WHERE c.corrects = e.id)
+              {}
+              AND (?2 IS NULL OR e.occurred_at >= ?2)
+              AND (?3 IS NULL OR e.occurred_at <= ?3)
+            "#,
+            uid_clause
+        );
+        let superseded: i64 =
+            self.conn
+                .query_row(&superseded_sql, params![uid_param, since, until], |row| {
+                    row.get(0)
+                })?;
+
+        Ok(Report {
+            since,
+            until,
+            scope_uid: match scope {
+                Scope::Own(uid) => Some(uid),
+                Scope::Admin { only_uid } => only_uid,
+            },
+            principals,
+            superseded_by_corrections: superseded as u64,
+            basis: VISIBILITY_LABEL.to_string(),
+            quota_note: SHARED_QUOTA_LABEL.to_string(),
+        })
+    }
+}
