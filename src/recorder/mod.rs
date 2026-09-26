@@ -9,5 +9,6 @@
 pub mod client;
 pub mod db;
 pub mod event;
+pub mod producer;
 pub mod protocol;
 pub mod server;

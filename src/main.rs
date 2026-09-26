@@ -9,6 +9,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use timon::attempt::{AttemptSpec, Role, UsageSource, run_attempt};
 use timon::recorder::client::{send as recorder_send, send_line as recorder_send_line};
 use timon::recorder::event::{MAX_REQUEST_BYTES, UsageEvent};
+use timon::recorder::producer::{
+    DEFAULT_MAX_SPOOLED_EVENTS, Delivery, Spool, deliver, event_for, replay,
+};
 use timon::recorder::protocol::{Request, Response};
 use timon::recorder::server::{Config as RecorderConfig, serve as serve_recorder};
 use timon::usage::Accumulation;
@@ -152,6 +155,23 @@ struct RunArgs {
     /// Working directory for the attempt.
     #[arg(long)]
     cwd: Option<PathBuf>,
+    /// Report this attempt's usage to the recorder listening here. Without it
+    /// nothing is reported and no spool is written.
+    #[arg(long)]
+    usage_socket: Option<PathBuf>,
+    /// Private spool directory. Defaults to $TIMON_SPOOL_DIR, else
+    /// $XDG_STATE_HOME/timon/usage-spool, else ~/.local/state/timon/usage-spool.
+    #[arg(long)]
+    usage_spool: Option<PathBuf>,
+    /// Provider label recorded with the event.
+    #[arg(long)]
+    provider: Option<String>,
+    /// Model label recorded with the event.
+    #[arg(long)]
+    model: Option<String>,
+    /// Spooled events to try to deliver after this attempt.
+    #[arg(long, default_value_t = 32)]
+    usage_replay_batch: usize,
     /// Program to run, followed by its arguments.
     #[arg(last = true, required = true, num_args = 1..)]
     command: Vec<OsString>,
@@ -311,7 +331,32 @@ fn attempt_run(role: Role, args: RunArgs) -> Result<u8> {
 
     let runtime = tokio::runtime::Runtime::new().context("failed to start async runtime")?;
     let report = runtime.block_on(run_attempt(&spec, shutdown_signal()))?;
-    println!("{}", serde_json::to_string_pretty(&report)?);
+
+    // Reporting runs after the work and can only degrade tracking, never the
+    // attempt: a recorder that is down must not fail a run the user asked for.
+    let recording = args.usage_socket.as_deref().map(|socket| {
+        runtime.block_on(record_usage(
+            socket,
+            args.usage_spool.clone(),
+            &report,
+            args.provider.as_deref(),
+            args.model.as_deref(),
+            args.usage_replay_batch,
+        ))
+    });
+    if let Some(recording) = &recording
+        && let Some(warning) = recording.warning()
+    {
+        eprintln!("timon: {warning}");
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&ReportedAttempt {
+            attempt: &report,
+            recording: recording.as_ref(),
+        })?
+    );
 
     Ok(if report.process.cancelled {
         EXIT_CANCELLED
@@ -324,6 +369,142 @@ fn attempt_run(role: Role, args: RunArgs) -> Result<u8> {
     } else {
         0
     })
+}
+
+/// An attempt, plus what became of its usage record.
+#[derive(serde::Serialize)]
+struct ReportedAttempt<'a> {
+    #[serde(flatten)]
+    attempt: &'a timon::attempt::AttemptReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recording: Option<&'a Recording>,
+}
+
+/// What happened when this attempt's usage was reported.
+#[derive(serde::Serialize)]
+struct Recording {
+    /// `recorded`, `spooled` or `dropped`.
+    outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<i64>,
+    /// The daemon already held this event; nothing was added.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    duplicate: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+    /// Events recovered from the spool during this attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replayed: Option<ReplaySummary>,
+    /// Events known to be missing entirely. Their tokens are unknown, not zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gap: Option<timon::recorder::producer::Gap>,
+}
+
+#[derive(serde::Serialize)]
+struct ReplaySummary {
+    delivered: u64,
+    already_present: u64,
+    still_pending: u64,
+    corrupt: u64,
+}
+
+impl Recording {
+    /// A line worth putting on stderr, where a person will see it.
+    fn warning(&self) -> Option<String> {
+        if self.outcome == "dropped" {
+            return Some(format!(
+                "usage for this attempt was NOT recorded: {}",
+                self.detail.as_deref().unwrap_or("reason unknown")
+            ));
+        }
+        if self.outcome == "spooled" {
+            return Some(format!(
+                "usage for this attempt is spooled, not yet recorded: {}",
+                self.detail.as_deref().unwrap_or("reason unknown")
+            ));
+        }
+        if let Some(gap) = &self.gap
+            && gap.dropped > 0
+        {
+            return Some(format!(
+                "usage tracking is degraded: {} event(s) were lost and cannot be recovered",
+                gap.dropped
+            ));
+        }
+        None
+    }
+}
+
+/// Spools and delivers this attempt's usage, then drains what it can.
+async fn record_usage(
+    socket: &std::path::Path,
+    spool_dir: Option<PathBuf>,
+    report: &timon::attempt::AttemptReport,
+    provider: Option<&str>,
+    model: Option<&str>,
+    replay_batch: usize,
+) -> Recording {
+    let Some(dir) = spool_dir.or_else(Spool::resolve) else {
+        return Recording {
+            outcome: "dropped",
+            id: None,
+            duplicate: false,
+            detail: Some("no spool directory: set --usage-spool or TIMON_SPOOL_DIR".to_string()),
+            replayed: None,
+            gap: None,
+        };
+    };
+    let spool = match Spool::open(dir, DEFAULT_MAX_SPOOLED_EVENTS) {
+        Ok(spool) => spool,
+        Err(error) => {
+            return Recording {
+                outcome: "dropped",
+                id: None,
+                duplicate: false,
+                detail: Some(format!("the spool could not be opened: {error}")),
+                replayed: None,
+                gap: None,
+            };
+        }
+    };
+
+    let event = event_for(report, provider, model);
+    let delivery = deliver(socket, &spool, &event).await;
+
+    // Only worth draining once this attempt's own event is through; otherwise
+    // the recorder is down and a replay pass would just repeat the failure.
+    let replayed = match &delivery {
+        Delivery::Recorded { .. } => {
+            replay(socket, &spool, replay_batch)
+                .await
+                .ok()
+                .map(|r| ReplaySummary {
+                    delivered: r.delivered,
+                    already_present: r.already_present,
+                    still_pending: r.still_pending,
+                    corrupt: r.corrupt,
+                })
+        }
+        _ => None,
+    };
+
+    let (outcome, id, duplicate, detail) = match delivery {
+        Delivery::Recorded { id, duplicate } => ("recorded", Some(id), duplicate, None),
+        Delivery::Spooled { reason } => ("spooled", None, false, Some(reason)),
+        Delivery::Dropped { reason } => ("dropped", None, false, Some(reason)),
+    };
+    Recording {
+        outcome,
+        id,
+        duplicate,
+        detail,
+        replayed,
+        gap: spool
+            .read_gap()
+            .ok()
+            .flatten()
+            .filter(|gap| gap.dropped > 0),
+    }
 }
 
 /// Reads `--usage-source`. Anything that is not a known keyword is a path, so a

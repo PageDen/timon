@@ -66,6 +66,40 @@ pub struct UsageEvent {
 }
 
 impl UsageEvent {
+    /// Builds an event from values a producer observed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        client_event_id: String,
+        run_id: String,
+        attempt_id: String,
+        role: Role,
+        provider: Option<String>,
+        model: Option<String>,
+        usage: TokenUsage,
+        usage_status: UsageStatus,
+        duration_ms: Option<u64>,
+        occurred_at: i64,
+    ) -> Self {
+        UsageEvent {
+            version: PROTOCOL_VERSION,
+            client_event_id,
+            run_id,
+            attempt_id,
+            role,
+            provider,
+            model,
+            profile: None,
+            usage,
+            usage_status,
+            duration_ms,
+            occurred_at,
+            corrects: None,
+            uid: None,
+            user: None,
+            admin: None,
+        }
+    }
+
     /// True when the payload carried an identity claim the daemon ignored.
     pub fn carried_identity_claim(&self) -> bool {
         self.uid.is_some() || self.user.is_some() || self.admin.is_some()
