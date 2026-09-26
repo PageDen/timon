@@ -1,0 +1,12 @@
+Timon
+Copyright 2026 PageDen
+
+This product includes software adapted from Prodex
+(https://github.com/christiandoxa/prodex), licensed under the Apache License,
+Version 2.0. The adapted portions are the worker process supervision and
+concurrency slot handling in:
+
+  src/worker/process.rs
+  src/worker/slots.rs
+
+These files were modified from the originals; each carries a notice stating so.
