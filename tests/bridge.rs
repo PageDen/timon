@@ -386,3 +386,52 @@ fn a_shared_daemon_invocation_is_refused_before_anything_starts() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("shared app-server daemon"), "got: {stderr}");
 }
+
+#[test]
+fn the_bridge_exits_when_its_child_does_even_if_the_client_holds_stdin_open() {
+    // Found in production, not in testing. `codex-timon --version` hung: the
+    // child printed its version and exited, but the bridge was waiting for the
+    // stdin pump to finish, and stdin does not reach end of file while the client
+    // still holds its end. An editor's first health check is exactly this shape,
+    // so it would have hung on contact.
+    //
+    // Reaching the point where the child is reaped means its output is already at
+    // end of file, so nothing is lost by abandoning the stdin reader.
+    use std::io::Write;
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timon"))
+        .args(["bridge", "--", "/bin/echo", "done"])
+        // Piped and deliberately never closed, standing in for a client that
+        // stays alive after the process it spawned has exited.
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Something written but not closed, so the pump is mid-stream rather than
+    // merely idle.
+    let mut stdin = child.stdin.take().unwrap();
+    let _ = stdin.write_all(b"{}\n");
+    let _ = stdin.flush();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    // `stdin` is still open here on purpose: dropping it earlier would close the
+    // pipe and let the old, broken code pass.
+    drop(stdin);
+
+    assert!(
+        status.is_some(),
+        "the bridge must exit once its child has, without waiting on a stdin that never closes"
+    );
+    assert!(status.unwrap().success());
+}
