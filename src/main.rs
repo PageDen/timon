@@ -654,7 +654,7 @@ fn research_verify(args: VerifyArgs) -> Result<u8> {
     // Non-zero unless every sourced claim was shown to be supported. An
     // unverifiable claim is not a pass: a route that cannot be checked must not
     // let claims through by being unavailable.
-    Ok(if report.all_sourced_claims_supported {
+    Ok(if report.all_sourced_claims_quoted {
         0
     } else {
         1
@@ -666,7 +666,9 @@ fn render_verification(report: &verify::Report) -> String {
     let mut out = String::new();
     for checked in &report.checked {
         let (label, detail) = match &checked.verdict {
-            verify::Verdict::Supported { final_url, .. } => ("supported  ", final_url.clone()),
+            verify::Verdict::QuotationPresent { final_url, .. } => {
+                ("quote found ", final_url.clone())
+            }
             verify::Verdict::Unsupported { reason } => ("UNSUPPORTED", reason.clone()),
             verify::Verdict::Unverifiable { reason } => ("unverifiable", reason.clone()),
             verify::Verdict::NotChecked => {
@@ -677,14 +679,14 @@ fn render_verification(report: &verify::Report) -> String {
         out.push_str(&format!("  {label}  {claim}\n                 {detail}\n"));
     }
     out.push_str(&format!(
-        "\n  {} supported, {} unsupported, {} unverifiable -> {}\n",
-        report.supported,
+        "\n  {} quote found, {} unsupported, {} unverifiable -> {}\n",
+        report.quotation_present,
         report.unsupported,
         report.unverifiable,
-        if report.all_sourced_claims_supported {
-            "every sourced claim is supported"
+        if report.all_sourced_claims_quoted {
+            "every sourced claim's quotation was found on its page"
         } else {
-            "NOT every sourced claim is supported"
+            "NOT every sourced claim's quotation was found"
         }
     ));
     out.push_str(&format!("\n  {}\n", report.basis));
@@ -1025,12 +1027,12 @@ against the run: unknown is not zero",
         None
     };
     if let Some(verification) = &verification
-        && !verification.all_sourced_claims_supported
+        && !verification.all_sourced_claims_quoted
     {
         eprintln!(
-            "timon: {} of {} sourced claim(s) are not supported by the pages they cite",
+            "timon: {} of {} sourced claim(s) could not be matched to the pages they cite",
             verification.unsupported + verification.unverifiable,
-            verification.supported + verification.unsupported + verification.unverifiable
+            verification.quotation_present + verification.unsupported + verification.unverifiable
         );
     }
 
@@ -1048,7 +1050,7 @@ against the run: unknown is not zero",
     if require_supported_claims
         && verification
             .as_ref()
-            .is_some_and(|v| !v.all_sourced_claims_supported)
+            .is_some_and(|v| !v.all_sourced_claims_quoted)
     {
         return Ok(EXIT_RESULT_UNUSABLE);
     }
