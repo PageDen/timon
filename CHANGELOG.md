@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.2.2 — 2026-09-27
+
+No schema change: a database already at v2 is untouched by this update, so the
+only effect on the recorder is a restart. A verified backup before updating is
+still the habit worth keeping.
 
 ### Codex Desktop and IDE sessions are visible to the recorder (amendment A2)
 
