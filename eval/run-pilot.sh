@@ -30,7 +30,14 @@ echo "arm,task,ok,seconds,lead_tokens,worker_tokens,total_tokens,reason" > "$OUT
 n=$(python3 -c "import json;print(len(json.load(open('$SUITE'))['tasks']))")
 for i in $(seq 0 $((n-1))); do
   task=$(python3 -c "import json;print(json.dumps(json.load(open('$SUITE'))['tasks'][$i]))")
-  id=$(python3 -c "import json;print(json.loads('''$task''')['id'])" 2>/dev/null || echo "t$i")
+  # Read from the suite by index rather than interpolating the task JSON into a
+  # shell string. The old form did the latter, and the shell unescapes a
+  # backslash-quote inside double quotes, so any task whose own text contained a
+  # quote arrived at Python as broken JSON and fell back to "t$i". Nothing was
+  # mis-scored -- the score comes from the task passed on argv below -- but the
+  # output directory then disagreed with the task id in results.csv, so a saved
+  # answer could not be mapped back to its task by name afterwards.
+  id=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['tasks'][int(sys.argv[2])]['id'])" "$SUITE" "$i")
   goal=$(python3 -c "import json,sys;print(json.loads(sys.stdin.read())['goal'])" <<<"$task")
   schema="$OUT/schema-$(python3 -c "import json,sys;print(json.loads(sys.stdin.read())['schema'])" <<<"$task").json"
 

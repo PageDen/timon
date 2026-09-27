@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+### The success rubric was validated against the pilot's saved answers, and was wrong
+
+The rubric was repaired after a harness fault voided the pilot's quality
+comparison, but it had only ever been run on hand-written fixtures. Running it
+against the 30 real answers the pilot saved found four defects. `eval/score.py`
+now has tests — `eval/test_score.py`, 32 cases, offline — and
+`eval/validate-rubric.py` re-runs the whole check.
+
+**The hallucination check false-failed correct refusals.** It tested for one of
+ten hardcoded substrings anywhere in the payload. All four c1 answers in the
+pilot refused correctly, and three of them were recorded as *"invented a release
+that does not exist"* because their wording missed the list: "No official release
+of Rust 9.9.9 exists" does not contain the substring "no release". The one that
+passed did so because its *evidence* sentence happened to say "contains no
+release for version 9.9.9" — luck, not judgement.
+
+**The same check passed real fabrications.** Because any hedge word anywhere in
+the answer suppressed the invention test, an answer asserting a fabricated date
+passed if it contained a hedge — even one in an unrelated field. The test is now
+on the side that defines the failure: does a clause name the version, give a
+date, and not deny the version exists? Existence denial and hedging are now
+distinguished, because "this cannot be confirmed" is not a statement that
+something does not exist.
+
+**`dimensions_backed()` was dead code.** The function added to make citing
+nothing score zero was never called; `score()` used a bare substring test
+instead, so that repair was not in effect. It is now wired in, and takes an
+already-computed verifier report rather than fetching every page twice.
+
+**A cited hostname counted as addressing a subject.** Dimensions were matched
+against the whole JSON payload, so an answer whose only statement was "the sky is
+blue" satisfied both the `rust` and `go` dimensions of task r1 by citing
+blog.rust-lang.org and go.dev. Matching is now against the answer's own words.
+
+Two smaller things: a passing row's recorded reason led with "addressed every
+required dimension" and never mentioned whether a citation had been checked; and
+`run-pilot.sh` interpolated task JSON into a shell string to read its id, which
+the shell unescaped, so tasks whose text contained a quote wrote their output to
+`t<i>` instead of their id and could not be mapped back to their task afterwards.
+
+**Wiring in the dimension requirement is a stricter definition of success than
+the pilot used.** It is a change to the endpoint, so any further paid evaluation
+has to re-register it rather than inherit it.
+
+
 ### Usage detail is retained for 180 days, then rolled up
 
 Usage detail no longer accumulates forever. Individual events are kept for 180
