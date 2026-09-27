@@ -102,6 +102,25 @@ derived rather than generated so that a retry or a replay after a restart
 produces the same id, which is what lets durable usage recording deduplicate
 instead of double counting.
 
+Being derived, it is also easy for two people to produce the same one. That only
+matters where two people share a uid, which happens when an account is removed
+and Linux reissues its number — so the recorder scopes deduplication to a
+*generation* of a uid, and `timon usage retire-uid` records the boundary when an
+account goes. See [deploy/RUNBOOK.md](deploy/RUNBOOK.md#uid-reuse).
+
+### Retention
+
+Usage detail is kept for 180 days and then rolled up into per-account, per-month
+totals, which are kept indefinitely. A total answers what an account cost; a year
+of event rows also records each individual thing that account ran.
+
+Nothing is deleted to do it. The event table is append-only and its triggers
+refuse a delete, so `timon usage retain` builds a new database, verifies that the
+live event count and token sums are unchanged across the boundary, and swaps the
+file — keeping the previous one beside it. A report covering a window whose detail
+has been rolled up says so instead of returning a total that reads like a quiet
+month, and `timon usage monthly` reads the totals that do cover it.
+
 ## Example
 
 ```sh

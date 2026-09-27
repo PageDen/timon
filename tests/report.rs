@@ -175,8 +175,10 @@ fn own_scope_totals_only_the_callers_usage() {
 
 #[test]
 fn a_uid_seen_under_two_names_is_flagged() {
-    // A rename is harmless. A recycled uid is not: it would merge two people's
-    // history, and this is the only signal that it happened.
+    // A rename is harmless. A uid recycled *without* a recorded retirement is
+    // not: it merges two people's history, and this is the only signal that it
+    // happened. Recording the retirement is what separates them; see
+    // `tests/generations.rs`.
     let dir = tempfile::tempdir().unwrap();
     let mut store = store(dir.path());
     store
@@ -193,7 +195,15 @@ fn a_uid_seen_under_two_names_is_flagged() {
         Some("newname"),
         "the latest name is shown for display"
     );
-    assert!(render::text(&report).contains("recycled uid"));
+    let text = render::text(&report);
+    assert!(
+        text.contains("2 different names seen within this generation"),
+        "the rename is surfaced, got: {text}"
+    );
+    assert!(
+        text.contains("without recording a retirement"),
+        "and so is the case where it is not a rename, got: {text}"
+    );
 }
 
 #[test]
@@ -287,7 +297,11 @@ fn csv_quotes_anything_that_would_change_the_shape_of_a_row() {
     );
     // The header row must still have the column count it declares.
     let header = csv.lines().find(|l| l.starts_with("uid,")).unwrap();
-    assert_eq!(header.split(',').count(), 13);
+    assert_eq!(
+        header.split(',').count(),
+        14,
+        "uid, generation, username, names_seen, and ten measures"
+    );
 }
 
 #[test]

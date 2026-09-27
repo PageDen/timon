@@ -12,4 +12,5 @@ pub mod event;
 pub mod producer;
 pub mod protocol;
 pub mod render;
+pub mod retain;
 pub mod server;

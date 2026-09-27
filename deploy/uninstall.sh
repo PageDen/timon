@@ -10,12 +10,16 @@ PURGE=no
 say() { printf '  %s\n' "$*"; }
 
 say "stopping and disabling"
+sudo systemctl disable --now timon-usage-retain.timer 2>/dev/null || true
+sudo systemctl disable --now timon-usage-retain.service 2>/dev/null || true
 sudo systemctl disable --now timon-usage-backup.timer 2>/dev/null || true
 sudo systemctl disable --now timon-usage-backup.service 2>/dev/null || true
 sudo systemctl disable --now timon-usage.service 2>/dev/null || true
 sudo rm -f /etc/systemd/system/timon-usage.service \
            /etc/systemd/system/timon-usage-backup.service \
-           /etc/systemd/system/timon-usage-backup.timer
+           /etc/systemd/system/timon-usage-backup.timer \
+           /etc/systemd/system/timon-usage-retain.service \
+           /etc/systemd/system/timon-usage-retain.timer
 sudo systemctl daemon-reload
 sudo rm -rf /run/timon-usage
 

@@ -1,0 +1,37 @@
+# Rolls usage detail older than the retention window into monthly totals.
+# Driven by timon-usage-retain.timer.
+#
+# Unlike the backup, this cannot run while the recorder is up. The daemon is the
+# only writer, and retention publishes a rebuilt file under the database's name;
+# swapping it under a running daemon would leave that daemon writing to an inode
+# nothing reads. So the recorder is stopped for the duration.
+#
+# That stop is why this unit runs as root, and it is the only reason. The work
+# itself drops to the service account through setpriv, so the rebuilt database is
+# owned by the same account that owns the original rather than by root.
+#
+# ExecStopPost restarts the recorder unconditionally. A retention run that fails
+# must not leave usage recording switched off — the command is written to leave
+# the original database in place on any failure, so the worst outcome is
+# retention not having happened.
+
+[Unit]
+Description=Timon usage retention (rolls detail into monthly totals)
+Documentation=https://github.com/PageDen/timon
+After=timon-usage.service
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStartPre=/bin/systemctl stop timon-usage.service
+ExecStart=/usr/bin/setpriv --reuid=adaptive-usage --regid=adaptive-usage --clear-groups \
+    /usr/local/lib/timon/timon usage retain \
+    --database /var/lib/timon-usage/usage.db \
+    --socket /run/timon-usage/usage.sock \
+    --keep-days 180
+ExecStopPost=/bin/systemctl start timon-usage.service
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/timon-usage

@@ -94,15 +94,101 @@ every event acknowledged after that point is gone, and restoring is not evidence
 that later events survived. Stop the service first, and the database it replaces
 is renamed aside rather than deleted.
 
-## Retention and uid reuse
+## Retention
 
-Backups are pruned to the newest `--keep` (14 by default) after a successful
+Two different things are retained on two different schedules.
+
+**Backups** are pruned to the newest `--keep` (14 by default) after a successful
 publish. Set `TIMON_KEEP_BACKUPS` when installing to change it.
 
-**A uid must not be recycled while records for it are retained.** The number is
-the identity; a username change does not create a new one. If an account is
-deleted and its uid later reissued, the new person inherits the old usage
-history. The code does not and cannot enforce this — it is an operating rule.
+**Usage detail** is kept for 180 days, then rolled up into per-account,
+per-month totals by `timon-usage-retain.timer`, weekly on Sunday at 04:00. The
+monthly totals are kept indefinitely: a total answers what an account cost,
+while a year of event rows also records each individual thing that account ran,
+which is a more sensitive thing to hold on a shared machine.
+
+Nothing is deleted. `usage_events` is append-only and the triggers would refuse a
+delete; retention builds a new database holding the detail still inside the
+window plus totals for everything older, checks that not one token went missing
+across the boundary, and swaps the file. Each published database is append-only
+for its whole life.
+
+To change the window, edit `--keep-days` in
+`/etc/systemd/system/timon-usage-retain.service`.
+
+### Running it by hand
+
+Always look before you cut:
+
+```
+sudo -u adaptive-usage /usr/local/lib/timon/timon usage retain \
+    --database /var/lib/timon-usage/usage.db \
+    --socket /run/timon-usage/usage.sock \
+    --keep-days 180 --dry-run
+```
+
+A real run needs the recorder stopped — it is the only writer, and swapping the
+file underneath it would leave it writing where nothing reads. `--socket` is
+checked first and the run refused with **exit 75** if the daemon answers, so the
+ordinary mistake is caught rather than tolerated. The timer's unit handles the
+stop and the restart itself.
+
+Each run leaves the pre-retention database beside the live one as
+`usage.db.pre-retain-<unix>.db`. **That file is the only remaining copy of the
+detail just rolled up.** It is deliberately not removed, so a mistaken
+`--keep-days` is recoverable; delete it once you are satisfied.
+
+### Reading a total after its detail is gone
+
+`timon usage report` says so rather than returning a small number that reads like
+a quiet month: any window reaching back before the cutoff is marked, in text and
+in the CSV header. The totals themselves are still readable, by their owner as
+well as by an administrator:
+
+```
+timon usage monthly --socket /run/timon-usage/usage.sock
+timon usage monthly --socket /run/timon-usage/usage.sock --from-month 2026-01
+```
+
+## uid reuse
+
+**The uid is the identity.** `SO_PEERCRED` reports a number and nothing else, a
+username change does not create a new one, and Linux reissues a number after its
+account is removed.
+
+**So when you remove an account, record it:**
+
+```
+sudo -u adaptive-usage /usr/local/lib/timon/timon usage retire-uid \
+    --database /var/lib/timon-usage/usage.db \
+    --uid 1001 --username alice --note "left the team"
+```
+
+That closes the uid's current generation. Events recorded afterwards belong to
+the next one, and the two are never totalled together: a new holder of uid 1001
+sees its own usage and not the previous holder's, and cannot correct the previous
+holder's rows. An administrator can still see both, labelled and listed
+separately. Existing rows are not modified.
+
+The generation is also part of the deduplication key, which matters more than it
+looks: `client_event_id` is derived from the role, run id and attempt id rather
+than generated, so two people who share a recycled uid can easily produce the
+same id. Without a boundary the second one's event is silently dropped as a
+duplicate, or refused as a conflict.
+
+**If you forget**, the two histories merge and there is no way to separate them
+afterwards — the database cannot tell that a number changed hands. The one signal
+is a report showing several names within one generation, which is usually just a
+rename. Recording the retirement is not optional if the figures are meant to
+mean anything.
+
+This is deliberately not automatic. Nothing watches `/etc/passwd`, because a
+missing entry is not proof an account was removed — it is also what a directory
+service outage looks like, and guessing wrong would split one person's history in
+two.
+
+Better still, do not recycle uids at all. Recording the boundary makes reuse
+safe; not reusing the number in the first place makes the question moot.
 
 ## Removal
 

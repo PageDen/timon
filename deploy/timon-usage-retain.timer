@@ -1,0 +1,20 @@
+# Weekly rather than nightly: retention stops the recorder for the length of a
+# rebuild, and there is nothing to gain from aging detail out more often than the
+# window itself changes.
+#
+# Offset from the backup timer on purpose. A backup taken immediately before
+# retention is the thing that makes a mistaken --keep-days recoverable, so the
+# ordering matters: back up first, then roll up.
+
+[Unit]
+Description=Weekly Timon usage retention
+Documentation=https://github.com/PageDen/timon
+
+[Timer]
+OnCalendar=Sun 04:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=timon-usage-retain.service
+
+[Install]
+WantedBy=timers.target
