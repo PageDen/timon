@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## v0.2.1 — 2026-09-27
+
+Everything below ships to the shared hosts. The schema moves to v2, so the
+recorder migrates its database the first time this binary opens it; the migration
+aborts rather than proceeding if the row count or token sum changes, and a
+verified backup should be taken before the update regardless.
 
 ### The cost counter was cross-checked, and holds
 
