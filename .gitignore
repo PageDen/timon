@@ -1,1 +1,5 @@
 /target
+
+# Python bytecode from the evaluation scorer
+__pycache__/
+*.pyc

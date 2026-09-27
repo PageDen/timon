@@ -1,0 +1,69 @@
+{
+  "registered": "2026-09-27",
+  "note": "Written before any arm was run. Success criteria are machine-checkable and do not depend on the author knowing the answers: a research task passes on its citations verifying and on addressing every required dimension, not on matching a value the author asserted from memory.",
+  "tasks": [
+    {
+      "id": "r1",
+      "family": "multi-source-research",
+      "decomposable": true,
+      "split": "pilot",
+      "goal": "Report the current stable version number of the Rust compiler and of the Go programming language. Give a source URL for each, and quote the sentence from each page that states the version.",
+      "requires_dimensions": ["rust", "go"],
+      "requires_version_pattern": true,
+      "min_sourced_claims": 2
+    },
+    {
+      "id": "r2",
+      "family": "multi-source-research",
+      "decomposable": true,
+      "split": "pilot",
+      "goal": "Report the current latest stable release version of PostgreSQL and of SQLite. Give a source URL for each, and quote the sentence from each page that states the version.",
+      "requires_dimensions": ["postgresql", "sqlite"],
+      "requires_version_pattern": true,
+      "min_sourced_claims": 2
+    },
+    {
+      "id": "r3",
+      "family": "multi-source-research",
+      "decomposable": true,
+      "split": "pilot",
+      "goal": "Report the current stable version of the Linux kernel and the current stable version of Python. Give a source URL for each, and quote the sentence from each page that states the version.",
+      "requires_dimensions": ["linux", "python"],
+      "requires_version_pattern": true,
+      "min_sourced_claims": 2
+    },
+    {
+      "id": "c1",
+      "family": "conflicting-or-absent-evidence",
+      "decomposable": true,
+      "split": "pilot",
+      "goal": "Report the official release date of version 9.9.9 of the Rust compiler, with a source URL. If no such release exists, say so explicitly rather than giving a date.",
+      "must_report_unable": true,
+      "must_not_invent_version": "9.9.9"
+    },
+    {
+      "id": "x1",
+      "family": "bounded-extraction",
+      "decomposable": false,
+      "split": "pilot",
+      "goal": "From this text, extract each person and their role, as JSON. Text: 'Ada Lovelace worked as a mathematician. Alan Turing worked as a logician. Grace Hopper worked as a rear admiral.'",
+      "expect_exact": {
+        "people": [
+          { "name": "Ada Lovelace", "role": "mathematician" },
+          { "name": "Alan Turing", "role": "logician" },
+          { "name": "Grace Hopper", "role": "rear admiral" }
+        ]
+      }
+    },
+    {
+      "id": "s1",
+      "family": "single-fact-lookup",
+      "decomposable": false,
+      "split": "pilot",
+      "goal": "Report the current stable version number of the Go programming language, with a source URL and a quoted sentence from that page stating the version.",
+      "requires_dimensions": ["go"],
+      "requires_version_pattern": true,
+      "min_sourced_claims": 1
+    }
+  ]
+}

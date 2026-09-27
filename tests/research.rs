@@ -323,3 +323,92 @@ fn a_status_says_something_about_the_citation_only_when_it_is_about_the_page() {
         );
     }
 }
+
+// --- regressions from real model output ------------------------------------
+//
+// Every case below comes from answers that real models actually produced during
+// the evaluation pilot. My original tests used excerpts I had pasted by hand,
+// exactly matching the page, which is not how models quote — so the tests could
+// not have caught any of these.
+
+#[test]
+fn a_quotation_delivered_inside_quotation_marks_still_matches() {
+    // Asking a model to "quote the sentence" gets the sentence *and* the marks.
+    // Failing that is failing correct work on its punctuation.
+    let page = "The Rust team has published a new point release of Rust, 1.98.1.";
+    let quoted = "\u{201c}The Rust team has published a new point release of Rust, 1.98.1.\u{201d}";
+    assert!(verify::matches_page(
+        &normalise_for_test(page),
+        &normalise_for_test(quoted)
+    ));
+}
+
+#[test]
+fn markdown_emphasis_a_model_added_does_not_break_the_match() {
+    // A page renders `go fix` as <code>go fix</code>; the model writes backticks.
+    let page = "includes fixes to cgo, the compiler, the runtime, the go fix command";
+    let quoted = "includes fixes to cgo, the compiler, the runtime, the `go fix` command";
+    assert!(verify::matches_page(
+        &normalise_for_test(page),
+        &normalise_for_test(quoted)
+    ));
+}
+
+#[test]
+fn a_long_quotation_that_diverges_in_one_character_still_matches() {
+    // A 200-character quote differing by a comma should not fail outright. The
+    // tolerance is a long verbatim run, never a resemblance.
+    let page = "go1.27.1 (released 2026-09-01) includes fixes to cgo, the compiler, the runtime, \
+and the database/sql, debug/elf, encoding/json packages.";
+    let quoted = "go1.27.1 (released 2026-09-01) includes fixes to cgo, the compiler, the runtime \
+and the database/sql, debug/elf, encoding/json packages.";
+    assert!(verify::matches_page(
+        &normalise_for_test(page),
+        &normalise_for_test(quoted)
+    ));
+}
+
+#[test]
+fn tolerating_divergence_does_not_make_invented_text_pass() {
+    // The whole point. Every tier requires an exact run of the page's own
+    // characters, so a plausible sentence nobody wrote is still refused.
+    let page = "The Rust team has published a new point release of Rust, 1.98.1.";
+    let invented = "The Rust team has decided to discontinue the compiler entirely, \
+effective immediately, and recommends all users migrate away.";
+    assert!(!verify::matches_page(
+        &normalise_for_test(page),
+        &normalise_for_test(invented)
+    ));
+}
+
+#[test]
+fn describing_a_page_is_not_quoting_it() {
+    // The commonest real failure: the model reports what it did rather than what
+    // the page says. That is not a citation and must not verify.
+    let page = "Version 1.98.1 (2026-09-03)";
+    let described = "The worker checked the official release-note history and found no \
+entry for version 9.9.9.";
+    assert!(!verify::matches_page(
+        &normalise_for_test(page),
+        &normalise_for_test(described)
+    ));
+}
+
+#[test]
+fn a_version_quoted_from_a_table_is_found_despite_the_markup() {
+    // Tag boundaries are word boundaries. Dropping them turned
+    // `<td>6.17</td><td>stable</td>` into `6.17stable`.
+    let html = "<table><tr><td>6.17.4</td><td>stable</td></tr></table>";
+    let quoted = "6.17.4 stable and it is the current longterm release";
+    let page = normalise_for_test(&verify::strip_markup_for_test(html));
+    assert!(
+        page.contains("6.17.4 stable"),
+        "expected a word boundary between cells, got {page:?}"
+    );
+    let _ = quoted;
+}
+
+/// Mirrors the crate's own normalisation so these tests compare like with like.
+fn normalise_for_test(text: &str) -> String {
+    verify::normalise_for_test(text)
+}

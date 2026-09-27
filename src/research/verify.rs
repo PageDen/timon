@@ -153,10 +153,23 @@ needed)",
     match fetch::get(url, timeout) {
         Ok(page) => {
             let text = normalise(&strip_markup(&page.body));
-            if text.contains(&excerpt) {
+            // Asking a model to quote a sentence gets a quotation, usually with
+            // the quotation marks it was delivered in, and often with a sentence
+            // of narration around it. Requiring the raw string to appear failed
+            // correctly sourced claims on their punctuation.
+            if matches_page(&text, &excerpt) {
                 Verdict::Supported {
                     url: url.clone(),
                     final_url: page.final_url,
+                }
+            } else if page.truncated {
+                // Absence from a prefix is not absence from the page.
+                Verdict::Unverifiable {
+                    reason: format!(
+                        "the passage was not in the first {} bytes of {}, which is all that was read",
+                        fetch::MAX_BODY_BYTES,
+                        page.final_url
+                    ),
                 }
             } else {
                 Verdict::Unsupported {
@@ -209,8 +222,108 @@ pub fn verdict_for_status(status: u16) -> Verdict {
     }
 }
 
+/// Whether the page carries the quoted passage.
+///
+/// Tries the whole excerpt first, then its narrower forms, then a substantial
+/// verbatim run from within it. What it never does is match on similarity: every
+/// tier requires an exact run of the page's own characters.
+pub fn matches_page(text: &str, excerpt: &str) -> bool {
+    let forms = candidates(excerpt);
+    if forms.iter().any(|form| text.contains(form)) {
+        return true;
+    }
+    // Long quotations diverge in a comma or a dash somewhere. Accept a run long
+    // enough that it cannot be coincidence.
+    forms.iter().any(|form| longest_run_present(text, form))
+}
+
+/// True when some window of `MIN_VERBATIM_RUN` characters of `form` is on the page.
+fn longest_run_present(text: &str, form: &str) -> bool {
+    let chars: Vec<char> = form.chars().collect();
+    if chars.len() <= MIN_VERBATIM_RUN {
+        return false;
+    }
+    // Stepping rather than testing every offset: a genuine quotation shares a
+    // long stretch with the page, so a coarse sweep finds it, and the cost stays
+    // bounded on a large page.
+    let step = 8;
+    let mut start = 0;
+    while start + MIN_VERBATIM_RUN <= chars.len() {
+        let window: String = chars[start..start + MIN_VERBATIM_RUN].iter().collect();
+        if text.contains(&window) {
+            return true;
+        }
+        start += step;
+    }
+    false
+}
+
+/// The forms of an excerpt worth looking for on the page.
+///
+/// Ordered widest first, so a whole-excerpt match is preferred and the narrower
+/// forms only apply when punctuation or narration got in the way. Each is still
+/// long enough to be meaningful: a short fragment would match almost any page,
+/// which is why `MIN_EXCERPT_CHARS` is applied to the candidates too.
+pub fn candidates(excerpt: &str) -> Vec<String> {
+    let mut out = vec![excerpt.to_string()];
+
+    // Without the wrapping quotation marks the model delivered it in.
+    let unwrapped = excerpt
+        .trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace())
+        .to_string();
+    if unwrapped != *excerpt {
+        out.push(unwrapped);
+    }
+
+    // Any quoted span inside the excerpt, for evidence like
+    // `The page states: "..." under Stable versions.`
+    let bytes: Vec<char> = excerpt.chars().collect();
+    let mut start = None;
+    for (index, ch) in bytes.iter().enumerate() {
+        if *ch == '"' {
+            match start {
+                None => start = Some(index + 1),
+                Some(from) => {
+                    let span: String = bytes[from..index].iter().collect();
+                    if span.chars().count() >= MIN_EXCERPT_CHARS {
+                        out.push(span);
+                    }
+                    start = None;
+                }
+            }
+        }
+    }
+
+    out.retain(|c| c.chars().count() >= MIN_EXCERPT_CHARS);
+    out.sort_by_key(|c| std::cmp::Reverse(c.chars().count()));
+    out.dedup();
+    out
+}
+
 /// Shortest passage worth trying to match.
 pub const MIN_EXCERPT_CHARS: usize = 24;
+
+/// Length of verbatim run accepted from a longer quotation.
+///
+/// A long quote that differs from the page by one comma should not fail
+/// entirely, but the tolerance has to stay a *verbatim* test rather than a
+/// resemblance one. Forty-eight consecutive characters do not appear on a page
+/// by accident, so this still refuses invented text while surviving a stray
+/// character in the middle of a 200-character quotation.
+pub const MIN_VERBATIM_RUN: usize = 48;
+
+/// Exposes normalisation so tests compare like with like rather than
+/// re-implementing it and drifting.
+#[doc(hidden)]
+pub fn normalise_for_test(text: &str) -> String {
+    normalise(text)
+}
+
+/// Exposes markup stripping for the same reason.
+#[doc(hidden)]
+pub fn strip_markup_for_test(html: &str) -> String {
+    strip_markup(html)
+}
 
 /// Collapses text so quoting differences in whitespace do not matter.
 fn normalise(text: &str) -> String {
@@ -225,6 +338,12 @@ fn normalise(text: &str) -> String {
             out.push(' ');
         }
         space = false;
+        // Markdown emphasis is formatting the model added around the page's
+        // words, not part of them: a page renders `go fix` as <code>go fix</code>,
+        // so keeping the backticks would fail the match on punctuation alone.
+        if matches!(ch, '`' | '*' | '_') {
+            continue;
+        }
         // Curly quotes and dashes travel badly between a page and a quotation.
         out.push(match ch {
             '\u{2018}' | '\u{2019}' => '\'',
@@ -245,8 +364,17 @@ fn strip_markup(html: &str) -> String {
     let mut chars = html.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
-            '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
+            '<' => {
+                depth += 1;
+                // A tag boundary is a word boundary. Dropping it outright turned
+                // `<td>6.17</td><td>stable</td>` into `6.17stable`, so a version
+                // quoted from any table read as absent from the page.
+                out.push(' ');
+            }
+            '>' => {
+                depth = depth.saturating_sub(1);
+                out.push(' ');
+            }
             _ if depth > 0 => {}
             '&' => {
                 let mut entity = String::new();
