@@ -38,6 +38,41 @@ def verify_citations(answer, timeout=60):
         return None, f"the verifier returned nothing usable: {done.stdout[:120]}"
 
 
+def dimensions_backed(task, answer, timeout=120):
+    """How many of the task's required dimensions a verified citation backs.
+
+    The denominator is what the task asked for, not what the answer chose to
+    claim. That matters: scoring verified claims over *claimed* claims gives a
+    perfect result for citing nothing, which two arms in the pilot did on two
+    tasks. It also gives partial credit, which an all-or-nothing pass does not --
+    under that rubric every arm scored 1 of 6 and the measure could not tell them
+    apart at all.
+
+    Returns (backed, required, note).
+    """
+    required = task.get("requires_dimensions") or []
+    if not required:
+        return 0, 0, "no dimensions required"
+    if not answer or not answer.get("claims"):
+        return 0, len(required), "no claims to check"
+    sourced = [c for c in answer["claims"] if c.get("kind") == "sourced"]
+    if not sourced:
+        return 0, len(required), "nothing was cited"
+    report, error = verify_citations({"claims": sourced}, timeout=timeout)
+    if error:
+        return 0, len(required), error
+    verified = [
+        c["claim"]
+        for c in report.get("checked", [])
+        if c.get("verdict", {}).get("verdict") in ("quotation_present", "supported")
+    ]
+    backed = sum(
+        1 for d in required
+        if any(d in json.dumps(c).lower() for c in verified)
+    )
+    return backed, len(required), f"{backed} of {len(required)} dimension(s) backed by a found quotation"
+
+
 def score(task, answer):
     """Returns (passed, reasons). A reason is always given, pass or fail."""
     reasons = []
