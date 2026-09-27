@@ -1,0 +1,55 @@
+name: Release
+
+# Builds a binary for a tag and attaches it, so a deployment is reproducible
+# rather than a file somebody copied by hand.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The same gates as CI. A tag must not be able to ship something that
+      # would have failed on a branch.
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --release
+
+      - name: Check the tag matches the crate version
+        run: |
+          crate=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$crate" != "$tag" ]; then
+            echo "tag $tag does not match Cargo.toml version $crate" >&2
+            exit 1
+          fi
+          echo "version $crate matches tag $GITHUB_REF_NAME"
+
+      - run: cargo build --release
+
+      - name: Package with its checksum and deployment files
+        run: |
+          name="timon-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/$name"
+          cp target/release/timon "dist/$name/"
+          cp -r deploy CHANGELOG.md LICENSE NOTICE "dist/$name/"
+          # Recorded so an operator can confirm what they installed is what was
+          # built, which is the whole point of shipping a tarball.
+          ( cd "dist/$name" && sha256sum timon > timon.sha256 )
+          ( cd dist && tar czf "$name.tar.gz" "$name" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
+          ls -la dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          body_path: CHANGELOG.md
+          fail_on_unmatched_files: true
