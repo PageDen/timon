@@ -857,12 +857,21 @@ fn bridge_appserver(args: BridgeArgs) -> Result<u8> {
         .enable_all()
         .build()
         .context("starting the runtime")?;
-    let report = runtime.block_on(bridge::appserver::run(bridge::appserver::Config {
+    let outcome = runtime.block_on(bridge::appserver::run(bridge::appserver::Config {
         command: args.command,
         socket: args.socket,
         spool,
         model: args.model,
-    }))?;
+    }));
+    // Shut the runtime down without waiting for its blocking pool. `tokio::io::stdin`
+    // reads on a blocking thread, and aborting the task that owns it does not
+    // interrupt a read already in progress; dropping the runtime normally would
+    // then wait for that thread and hang the process after the child has exited.
+    // Everything that had to finish already has: the child is reaped, its output
+    // was flushed as it was forwarded, and the recorder task was awaited inside
+    // `run`.
+    runtime.shutdown_timeout(std::time::Duration::from_millis(0));
+    let report = outcome?;
 
     if args.report {
         // To stderr: stdout carries the protocol and must stay byte-identical.

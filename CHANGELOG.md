@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Fixed: the bridge hung after a short-lived child exited
+
+`codex-timon --version` never returned. The bridge waited for its stdin pump to
+finish before exiting, and stdin does not reach end of file while the client still
+holds its end open — so a child that printed something and exited left the bridge
+alive indefinitely. An editor's first health check is exactly that shape, so it
+would have hung on contact.
+
+Two causes, both fixed. The stdin pump is now abandoned rather than awaited once
+the child is reaped, which is safe because reaching that point means the child's
+output is already at end of file. And the runtime is shut down without waiting for
+its blocking pool: `tokio::io::stdin` reads on a blocking thread, and aborting the
+task that owns it does not interrupt a read already in progress, so dropping the
+runtime normally waited for that thread and hung anyway.
+
+Found on the production host rather than in testing — the first thing tried after
+deploying was `--version` through the wrapper, and it never came back. The
+regression test holds stdin open on purpose, because closing it lets the broken
+code pass.
+
+
 ## v0.2.2 — 2026-09-27
 
 No schema change: a database already at v2 is untouched by this update, so the

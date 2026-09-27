@@ -293,29 +293,36 @@ pub async fn run(config: Config) -> std::io::Result<Report> {
         })
     };
 
-    let client_to_server = tokio::spawn(async move {
-        let mut stdin = tokio::io::stdin();
-        let mut buffer = [0u8; 16 * 1024];
-        let mut total = 0u64;
-        loop {
-            match stdin.read(&mut buffer).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if to_child.write_all(&buffer[..n]).await.is_err() {
-                        break;
+    // Counted through a shared cell rather than returned, because this task is
+    // abandoned rather than awaited when the child exits first: a client may hold
+    // its end of stdin open indefinitely, and a read that never returns must not
+    // keep the bridge alive after the thing it was proxying has gone.
+    let sent = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let client_to_server = {
+        let sent = std::sync::Arc::clone(&sent);
+        tokio::spawn(async move {
+            let mut stdin = tokio::io::stdin();
+            let mut buffer = [0u8; 16 * 1024];
+            loop {
+                match stdin.read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if to_child.write_all(&buffer[..n]).await.is_err() {
+                            break;
+                        }
+                        if to_child.flush().await.is_err() {
+                            break;
+                        }
+                        sent.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     }
-                    if to_child.flush().await.is_err() {
-                        break;
-                    }
-                    total += n as u64;
                 }
             }
-        }
-        // Closing the child's stdin is how the app-server learns the client has
-        // gone, so it must happen rather than waiting for process teardown.
-        drop(to_child);
-        total
-    });
+            // Closing the child's stdin is how the app-server learns the client
+            // has gone, so it must happen rather than waiting for process
+            // teardown.
+            drop(to_child);
+        })
+    };
 
     let mut stdout = tokio::io::stdout();
     let mut observer = Observer::new();
@@ -360,7 +367,14 @@ pub async fn run(config: Config) -> std::io::Result<Report> {
     drop(tx);
     let status = child.wait().await?;
     report.exit_code = status.code();
-    report.bytes_client_to_server = client_to_server.await.unwrap_or(0);
+    // Abandoned deliberately, not awaited. Reaching here means the child's output
+    // is at end of file and the child has been reaped, so there is nothing left to
+    // forward; stdin, on the other hand, may stay open for as long as the client
+    // lives. Awaiting this hung the bridge after a short-lived child exited --
+    // `codex --version` through the wrapper never returned -- which is exactly
+    // the health check an editor is likely to run first.
+    client_to_server.abort();
+    report.bytes_client_to_server = sent.load(std::sync::atomic::Ordering::Relaxed);
     report.malformed_usage_notifications = observer.malformed;
     if let Ok((recorded, spooled)) = recorder.await {
         report.events_recorded = recorded;
