@@ -9,7 +9,10 @@ use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 /// Largest body read from a cited page.
-pub const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+///
+/// Real documentation pages are bigger than one might guess: go.dev/dl is over
+/// 3 MB, and a 2 MB cap made a perfectly good citation to it uncheckable.
+pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 /// Redirects followed before giving up.
 pub const MAX_REDIRECTS: u8 = 5;
 /// Whole-fetch deadline, including every redirect hop.
@@ -57,6 +60,8 @@ pub struct Page {
     pub final_url: String,
     pub status: u16,
     pub body: String,
+    /// The body is a prefix of the page, so a passage's absence proves nothing.
+    pub truncated: bool,
     pub redirects: Vec<String>,
     /// A meta-refresh was followed. Recorded because a verifier that stops at
     /// the first response would see a redirect stub and wrongly conclude the
@@ -69,6 +74,8 @@ struct Response {
     status: u16,
     headers: Vec<(String, String)>,
     body: String,
+    /// The body hit the size cap, so it is a prefix of the page.
+    truncated: bool,
 }
 
 /// A parsed, accepted URL.
@@ -206,6 +213,7 @@ pub fn get(url: &str, timeout: Duration) -> Result<Page, FetchError> {
             status,
             headers,
             body,
+            truncated,
         } = response;
 
         if let Some(location) = redirect_target(status, &headers) {
@@ -231,6 +239,7 @@ pub fn get(url: &str, timeout: Duration) -> Result<Page, FetchError> {
             final_url: current,
             status,
             body,
+            truncated,
             redirects,
             followed_meta_refresh,
         });
@@ -296,17 +305,29 @@ Accept: text/html,text/plain\r\nAccept-Encoding: identity\r\nConnection: close\r
     // Bounded by one more byte than allowed, so hitting the limit is detectable
     // rather than looking like a page that happened to be exactly that long.
     let mut body = Vec::new();
-    reader
+    if let Err(error) = reader
         .take(MAX_BODY_BYTES as u64 + 1)
         .read_to_end(&mut body)
-        .map_err(|error| FetchError::Transport(error.to_string()))?;
-    if body.len() > MAX_BODY_BYTES {
-        return Err(FetchError::TooLarge);
+    {
+        // A body already in hand is worth more than a tidy shutdown. Plenty of
+        // real servers close without TLS close_notify, and rustls reports that
+        // as a read error at end of stream; discarding the page over it made
+        // correctly cited claims uncheckable. With nothing read, the error stands.
+        if body.is_empty() {
+            return Err(FetchError::Transport(error.to_string()));
+        }
+    }
+    // Truncation is reported rather than refused. The passage may well be in the
+    // part we have, and only its absence from a truncated page is inconclusive.
+    let truncated = body.len() > MAX_BODY_BYTES;
+    if truncated {
+        body.truncate(MAX_BODY_BYTES);
     }
     Ok(Response {
         status,
         headers,
         body: String::from_utf8_lossy(&body).to_string(),
+        truncated,
     })
 }
 
