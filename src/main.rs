@@ -17,6 +17,7 @@ use timon::recorder::producer::{
 use timon::recorder::protocol::{Request, Response};
 use timon::recorder::render;
 use timon::recorder::server::{Config as RecorderConfig, serve as serve_recorder};
+use timon::research::verify::{self, Findings};
 use timon::usage::Accumulation;
 use timon::worker::slots::{SlotError, SlotMode, SlotPool};
 use timon::worker::{WorkerLimits, WorkerSpec};
@@ -55,6 +56,33 @@ enum Command {
     /// Operator commands for the host-wide worker slots.
     #[command(subcommand)]
     Slots(SlotsCommand),
+    /// Check whether cited claims are supported by the pages they cite.
+    #[command(subcommand)]
+    Research(ResearchCommand),
+}
+
+#[derive(Subcommand)]
+enum ResearchCommand {
+    /// Verify a findings document.
+    Verify(VerifyArgs),
+}
+
+#[derive(Args)]
+struct VerifyArgs {
+    /// Findings to check, or `-` for stdin.
+    #[arg(long)]
+    findings: String,
+    /// Whole-check deadline per claim.
+    #[arg(long, default_value_t = 20)]
+    timeout_secs: u64,
+    #[arg(long, value_enum, default_value_t = VerifyFormat::Text)]
+    format: VerifyFormat,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum VerifyFormat {
+    Text,
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -303,6 +331,18 @@ struct RunArgs {
     /// observed per-attempt usage on your own routes; it is never zero.
     #[arg(long, default_value_t = timon::admission::DEFAULT_ATTEMPT_RESERVE)]
     attempt_reserve: u64,
+    /// Check the typed result's cited claims against the pages they cite.
+    ///
+    /// Fetches each cited URL from this host. Only use it where reaching the
+    /// open internet from here is acceptable.
+    #[arg(long, requires = "result_file")]
+    verify_research: bool,
+    /// Treat an unsupported or unverifiable claim as an unusable result.
+    #[arg(long, requires = "verify_research")]
+    require_supported_claims: bool,
+    /// Whole-check deadline per claim.
+    #[arg(long, default_value_t = 20, requires = "verify_research")]
+    verify_timeout_secs: u64,
     /// Program to run, followed by its arguments.
     #[arg(last = true, required = true, num_args = 1..)]
     command: Vec<OsString>,
@@ -342,8 +382,70 @@ fn run() -> Result<u8> {
         Command::Worker(command) => (Role::Worker, command),
         Command::Usage(command) => return usage_command(command),
         Command::Slots(SlotsCommand::Provision(args)) => return slots_provision(args),
+        Command::Research(ResearchCommand::Verify(args)) => return research_verify(args),
     };
     attempt_run(role, args)
+}
+
+fn research_verify(args: VerifyArgs) -> Result<u8> {
+    let json = if args.findings == "-" {
+        let mut buffer = String::new();
+        std::io::stdin()
+            .lock()
+            .take(MAX_REQUEST_BYTES as u64)
+            .read_to_string(&mut buffer)
+            .context("failed to read findings from stdin")?;
+        buffer
+    } else {
+        std::fs::read_to_string(&args.findings)
+            .with_context(|| format!("reading {}", args.findings))?
+    };
+    let findings: Findings =
+        serde_json::from_str(&json).context("the findings could not be parsed")?;
+    let report = verify::check(&findings, Duration::from_secs(args.timeout_secs));
+
+    match args.format {
+        VerifyFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        VerifyFormat::Text => print!("{}", render_verification(&report)),
+    }
+    // Non-zero unless every sourced claim was shown to be supported. An
+    // unverifiable claim is not a pass: a route that cannot be checked must not
+    // let claims through by being unavailable.
+    Ok(if report.all_sourced_claims_supported {
+        0
+    } else {
+        1
+    })
+}
+
+/// Renders a verification for a person.
+fn render_verification(report: &verify::Report) -> String {
+    let mut out = String::new();
+    for checked in &report.checked {
+        let (label, detail) = match &checked.verdict {
+            verify::Verdict::Supported { final_url, .. } => ("supported  ", final_url.clone()),
+            verify::Verdict::Unsupported { reason } => ("UNSUPPORTED", reason.clone()),
+            verify::Verdict::Unverifiable { reason } => ("unverifiable", reason.clone()),
+            verify::Verdict::NotChecked => {
+                ("inference  ", "not checked; cites nothing".to_string())
+            }
+        };
+        let claim = checked.claim.text.chars().take(72).collect::<String>();
+        out.push_str(&format!("  {label}  {claim}\n                 {detail}\n"));
+    }
+    out.push_str(&format!(
+        "\n  {} supported, {} unsupported, {} unverifiable -> {}\n",
+        report.supported,
+        report.unsupported,
+        report.unverifiable,
+        if report.all_sourced_claims_supported {
+            "every sourced claim is supported"
+        } else {
+            "NOT every sourced claim is supported"
+        }
+    ));
+    out.push_str(&format!("\n  {}\n", report.basis));
+    out
 }
 
 fn slots_provision(args: ProvisionArgs) -> Result<u8> {
@@ -549,6 +651,12 @@ fn print_response(response: &Response) -> Result<u8> {
 }
 
 fn attempt_run(role: Role, args: RunArgs) -> Result<u8> {
+    // Kept before the spec takes ownership of the arguments it needs.
+    let verify_research = args.verify_research;
+    let require_supported_claims = args.require_supported_claims;
+    let verify_timeout = Duration::from_secs(args.verify_timeout_secs);
+    let result_file_for_verify = args.result_file.clone();
+
     let usage_source = parse_usage_source(&args.usage_source);
     let task = read_task(args.max_task_bytes)?;
 
@@ -666,13 +774,41 @@ against the run: unknown is not zero",
         eprintln!("timon: {warning}");
     }
 
+    // Verified after the attempt, never during it: a claim check reaches the
+    // network, and it must not be able to stall or fail the work itself.
+    let verification = if verify_research {
+        verify_attempt_research(result_file_for_verify.as_deref(), verify_timeout, &report)
+    } else {
+        None
+    };
+    if let Some(verification) = &verification
+        && !verification.all_sourced_claims_supported
+    {
+        eprintln!(
+            "timon: {} of {} sourced claim(s) are not supported by the pages they cite",
+            verification.unsupported + verification.unverifiable,
+            verification.supported + verification.unsupported + verification.unverifiable
+        );
+    }
+
     println!(
         "{}",
         serde_json::to_string_pretty(&ReportedAttempt {
             attempt: &report,
             recording: recording.as_ref(),
+            research: verification.as_ref(),
         })?
     );
+
+    // A result whose sourced claims do not hold is a result that cannot be used,
+    // which is what exit 65 already means.
+    if require_supported_claims
+        && verification
+            .as_ref()
+            .is_some_and(|v| !v.all_sourced_claims_supported)
+    {
+        return Ok(EXIT_RESULT_UNUSABLE);
+    }
 
     Ok(if report.process.cancelled {
         EXIT_CANCELLED
@@ -694,6 +830,30 @@ struct ReportedAttempt<'a> {
     attempt: &'a timon::attempt::AttemptReport,
     #[serde(skip_serializing_if = "Option::is_none")]
     recording: Option<&'a Recording>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    research: Option<&'a verify::Report>,
+}
+
+/// Checks the cited claims in an attempt's typed result, when it holds any.
+///
+/// A result that is not a findings document is not a failure: most attempts are
+/// not research, and `--verify-research` on one of those simply has nothing to
+/// check.
+fn verify_attempt_research(
+    result_file: Option<&std::path::Path>,
+    timeout: Duration,
+    report: &timon::attempt::AttemptReport,
+) -> Option<verify::Report> {
+    if !report.result.is_usable() {
+        return None;
+    }
+    let path = result_file?;
+    let json = std::fs::read_to_string(path).ok()?;
+    let findings: Findings = serde_json::from_str(&json).ok()?;
+    if findings.claims.is_empty() {
+        return None;
+    }
+    Some(verify::check(&findings, timeout))
 }
 
 /// What happened when this attempt's usage was reported.
