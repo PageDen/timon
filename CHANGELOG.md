@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.3.0 — 2026-09-27
+
+### Pooled credential store for quota rotation (amendment A4, slice 1)
+
+Quota rotation across several provider accounts is back in scope, and the design
+holds the credentials server-side so users never see them. This is the store and
+the means to inspect it. **There is no proxy yet, nothing routes through these
+credentials, and no user's Codex is affected** — provisioning it is safe to do
+early and reversible.
+
+`timon broker accounts` reports what is pooled and whether rotation is possible.
+`deploy/install-broker.sh` creates the store, deliberately separate from
+`install.sh` and never called by it: the account that owns this store will hold
+every pooled credential and, once the proxy exists, will see every prompt and
+response in plaintext. A host running the usage recorder should not acquire that
+by default. The service account is separate from the recorder's for the same
+reason — a compromise of one must not yield the other's secrets.
+
+**The invariant is that a credential value never leaves the store.** The types
+carry no token, so there is nothing to leak by accident, and the tests assert it
+by searching every rendering for the token's own text rather than trusting the
+design. Verified against a real `auth.json` with three live token values, in both
+text and JSON output.
+
+Faults are reported rather than hidden, because an operator needs to see the
+broken account: a credential readable beyond its owner (which silently defeats
+the point of pooling), a `chatgpt` account with no refresh token (works until it
+expires mid-session), an account never logged in, unreadable JSON. One broken
+account never hides another. Rotation is reported as impossible with fewer than
+two usable accounts, which is the arithmetic that closed this question the first
+time.
+
+Three things were verified before any of it was designed, and are recorded in
+Amendment A4: Codex honours a custom base URL under subscription auth, so no API
+keys are needed; authentication is two headers, so rotation is header
+substitution; and a caller's uid can be read from the kernel over loopback TCP,
+so no per-user tokens are needed. One thing was not verified and is Chris's
+accepted risk: whether pooling quota across two ChatGPT subscriptions is
+permitted by their terms.
+
+
 ## v0.2.3 — 2026-09-27
 
 A fix only. No schema change and no new capability: a database at v2 is untouched

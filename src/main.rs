@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use timon::admission::{Ledger, RunLimits};
 use timon::attempt::{AttemptSpec, Role, UsageSource, run_attempt};
 use timon::bridge;
+use timon::broker;
 use timon::mcp::tools::WorkerPolicy;
 use timon::recorder::client::{send as recorder_send, send_line as recorder_send_line};
 use timon::recorder::db::{RESTORE_CAVEAT, Store, plan_restore, restore};
@@ -58,6 +59,9 @@ enum Command {
     Usage(UsageCommand),
     /// Make a Codex Desktop or IDE session visible to the usage recorder
     Bridge(BridgeArgs),
+    /// Pooled provider credentials for quota rotation (amendment A4)
+    #[command(subcommand)]
+    Broker(BrokerCommand),
     /// Operator commands for the host-wide worker slots.
     #[command(subcommand)]
     Slots(SlotsCommand),
@@ -246,6 +250,21 @@ enum UsageCommand {
     /// Record that an account was removed, so the next holder of its uid starts
     /// a new generation instead of inheriting its history.
     RetireUid(RetireUidArgs),
+}
+
+#[derive(Subcommand)]
+enum BrokerCommand {
+    /// Show the pooled accounts, and whether rotation is possible
+    Accounts(BrokerAccountsArgs),
+}
+
+#[derive(Args)]
+struct BrokerAccountsArgs {
+    /// The account store. One subdirectory per pooled account.
+    #[arg(long, default_value = "/var/lib/timon-broker/accounts")]
+    store: PathBuf,
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    format: ReportFormat,
 }
 
 #[derive(Args)]
@@ -586,6 +605,7 @@ fn run() -> Result<u8> {
         Command::Research(ResearchCommand::Verify(args)) => return research_verify(args),
         Command::Mcp(args) => return mcp_serve(args),
         Command::Bridge(args) => return bridge_appserver(args),
+        Command::Broker(BrokerCommand::Accounts(args)) => return broker_accounts(args),
         Command::Orchestrate(args) => return orchestrate_run(args),
     };
     attempt_run(role, args)
@@ -826,6 +846,34 @@ fn usage_command(command: UsageCommand) -> Result<u8> {
         UsageCommand::Retain(args) => usage_retain(args),
         UsageCommand::RetireUid(args) => usage_retire_uid(args),
     }
+}
+
+fn broker_accounts(args: BrokerAccountsArgs) -> Result<u8> {
+    let store = broker::store::Store::open(&args.store).map_err(|error| {
+        anyhow::anyhow!(
+            "{error}. Create it as the service account that will own the pooled \
+             credentials, mode 0700, and log in once per account with CODEX_HOME \
+             pointed at a subdirectory of it."
+        )
+    })?;
+    let inventory =
+        broker::store::Inventory::of(&store).map_err(|error| anyhow::anyhow!("{error}"))?;
+    match args.format {
+        ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&inventory)?),
+        // CSV would be a third rendering to keep credential-free; text and JSON
+        // are enough for an inventory, so it reuses the text form rather than
+        // adding a surface that has to be audited.
+        ReportFormat::Text | ReportFormat::Csv => {
+            print!("{}", broker::store::render(&inventory))
+        }
+    }
+    // Exit 1 when something in the store is faulty, so a provisioning script can
+    // notice without parsing the output.
+    Ok(if inventory.accounts.iter().all(|a| a.usable()) {
+        0
+    } else {
+        1
+    })
 }
 
 fn bridge_appserver(args: BridgeArgs) -> Result<u8> {
