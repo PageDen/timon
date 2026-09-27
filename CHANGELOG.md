@@ -110,9 +110,11 @@ So it ships opt-in and experimental, with **no** cost or speed claim.
   enforce this.
 - Semantic claim support is unimplemented; see citation checking above.
 - Linux and Unix only. A non-Unix build is refused at compile time.
-- The Prodex engine route is unqualified. Only the direct `codex exec` route has
-  been qualified, and workers must not be described as read-only on the Prodex
-  route until it is.
+- The engine is the Codex CLI invoked directly. Quota rotation across several
+  accounts of one provider is therefore not available: that was Prodex's reason
+  for being in the design, and with a single account it bought nothing while
+  adding a dependency, a version pin and a forced-full-access risk. Reconsider
+  only with two or more accounts, and requalify the route before relying on it.
 
 ### Verified
 
