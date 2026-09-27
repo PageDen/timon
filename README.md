@@ -1,20 +1,30 @@
 # Timon
 
 Timon steers work across a strong lead model and cheaper, bounded workers on a
-shared Linux server. It uses an installed, version-pinned
-[Prodex](https://github.com/christiandoxa/prodex) as its model engine.
+shared Linux server.
+
+Timon does not talk to a model itself. It supervises a child process, and that
+child is what calls the model: `--lead-command` and `--worker-command` are given
+to it. V1's qualified engine is the Codex CLI invoked directly
+(`codex exec`); the usage adapter in `src/usage/codex.rs` parses that CLI's
+`exec --json` event stream.
 
 > *Timón* (Filipino/Spanish): the helm or rudder.
 
 ## Status
 
-Early development. Attempt supervision, typed results and usage accounting are
-in place; sandbox and route qualification against the pinned executables,
-durable usage recording and research come next.
+v0.2.0. The per-account usage recorder is released and running on a provisioned
+host; see `CHANGELOG.md` for what it does and `deploy/RUNBOOK.md` for operating
+it.
 
-Nothing here has been run against a real Prodex or Codex invocation. The event
-shape Timon parses is taken from documentation and public issue reports, not
-from a qualified run.
+The event shape Timon parses has been qualified against a pinned
+`codex-cli 0.153.2`, not taken from documentation: read-only execution and shell
+network denial hold despite a permissive profile default, typed results parse
+against their schema, and usage is emitted per completed turn.
+
+Orchestration (`timon orchestrate`) is present but **experimental**. Measured
+against a single strong model on the same six tasks it cost more on four of them
+and ran slower on all six, so it carries no cost or speed claim.
 
 ## Attempts
 
