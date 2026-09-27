@@ -183,3 +183,45 @@ fn unix_millis() -> u64 {
         .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
 }
+
+/// Placeholder in the worker command for the file the worker must write.
+///
+/// Timon creates each attempt's directory, so only Timon knows the path; the
+/// caller still writes the harness flag it belongs to. That keeps Timon out of
+/// the business of knowing what a given harness calls its output option.
+pub const RESULT_PLACEHOLDER: &str = "{result}";
+
+/// Placeholder for the schema the worker is held to.
+pub const SCHEMA_PLACEHOLDER: &str = "{schema}";
+
+/// Placeholder for the attempt's own private directory.
+pub const ATTEMPT_DIR_PLACEHOLDER: &str = "{attempt_dir}";
+
+/// Substitutes the per-attempt paths into the worker command.
+///
+/// A placeholder with nothing to fill it is left alone rather than replaced with
+/// an empty string, which would silently hand the harness a flag with no value.
+pub fn fill_placeholders(
+    command: &[std::ffi::OsString],
+    attempt_dir: &std::path::Path,
+    result_file: Option<&std::path::Path>,
+    schema: Option<&std::path::Path>,
+) -> Vec<std::ffi::OsString> {
+    command
+        .iter()
+        .map(|argument| {
+            let Some(text) = argument.to_str() else {
+                return argument.clone();
+            };
+            let mut filled = text.to_string();
+            filled = filled.replace(ATTEMPT_DIR_PLACEHOLDER, &attempt_dir.to_string_lossy());
+            if let Some(path) = result_file {
+                filled = filled.replace(RESULT_PLACEHOLDER, &path.to_string_lossy());
+            }
+            if let Some(path) = schema {
+                filled = filled.replace(SCHEMA_PLACEHOLDER, &path.to_string_lossy());
+            }
+            std::ffi::OsString::from(filled)
+        })
+        .collect()
+}

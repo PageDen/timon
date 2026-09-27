@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use timon::admission::{Ledger, RunLimits};
 use timon::attempt::{AttemptSpec, Role, UsageSource, run_attempt};
+use timon::mcp::tools::WorkerPolicy;
 use timon::recorder::client::{send as recorder_send, send_line as recorder_send_line};
 use timon::recorder::db::{RESTORE_CAVEAT, Store, plan_restore, restore};
 use timon::recorder::event::{MAX_REQUEST_BYTES, UsageEvent};
@@ -59,6 +60,114 @@ enum Command {
     /// Check whether cited claims are supported by the pages they cite.
     #[command(subcommand)]
     Research(ResearchCommand),
+    /// Serve the delegation tool over stdio, for a lead's harness to launch.
+    Mcp(McpArgs),
+    /// Run a goal through plan, delegate and integrate.
+    Orchestrate(OrchestrateArgs),
+}
+
+#[derive(Args)]
+struct OrchestrateArgs {
+    #[arg(long)]
+    run_id: String,
+    /// The goal, or `-` for stdin.
+    #[arg(long)]
+    goal: String,
+    #[arg(long)]
+    output_root: PathBuf,
+    /// Most tasks the lead may ask for.
+    #[arg(long, default_value_t = 4)]
+    max_tasks: usize,
+    #[arg(long, default_value_t = 300)]
+    lead_deadline_secs: u64,
+    #[arg(long, default_value_t = 300)]
+    worker_deadline_secs: u64,
+    #[arg(long, default_value_t = timon::worker::DEFAULT_MAX_TASK_BYTES)]
+    max_task_bytes: usize,
+    #[arg(long, default_value_t = timon::worker::DEFAULT_MAX_OUTPUT_BYTES)]
+    max_output_bytes: u64,
+    /// Schema the workers' and the final answer are held to.
+    #[arg(long)]
+    deliverable_schema: Option<PathBuf>,
+    #[arg(long, requires = "slots")]
+    slot_dir: Option<PathBuf>,
+    #[arg(long, requires = "slot_dir")]
+    slots: Option<NonZeroU16>,
+    #[arg(long, requires = "slot_dir")]
+    provisioned_slots: bool,
+    #[arg(long)]
+    run_ledger: Option<PathBuf>,
+    #[arg(long, default_value_t = 64)]
+    run_max_attempts: u32,
+    #[arg(long)]
+    run_token_ceiling: Option<u64>,
+    #[arg(long, default_value_t = timon::admission::DEFAULT_ATTEMPT_RESERVE)]
+    attempt_reserve: u64,
+    #[arg(long, default_value = "stdout")]
+    usage_source: String,
+    #[arg(long, value_enum, default_value_t = UsageAccounting::Delta)]
+    usage_accounting: UsageAccounting,
+    /// The lead command, as a JSON array of arguments.
+    ///
+    /// A JSON array rather than a bare argument list because two commands that
+    /// each contain their own flags cannot be told apart on one command line,
+    /// and splitting a string here would mean guessing at quoting. Placeholders
+    /// {result}, {schema} and {attempt_dir} are filled in per phase, and the
+    /// prompt arrives on stdin.
+    ///
+    /// Example: --lead-command '["codex","exec","-s","read-only","-o","{result}","-"]'
+    #[arg(long, required = true)]
+    lead_command: String,
+    /// The worker command, same form and same placeholders.
+    #[arg(long, required = true)]
+    worker_command: String,
+}
+
+#[derive(Args)]
+struct McpArgs {
+    /// Identifies the run every delegated worker is accounted to.
+    #[arg(long)]
+    run_id: String,
+    /// Directory the workers' attempt directories are made under.
+    #[arg(long)]
+    output_root: PathBuf,
+    /// Seconds a delegated worker may run before it is stopped.
+    #[arg(long, default_value_t = 300)]
+    worker_deadline_secs: u64,
+    #[arg(long, default_value_t = timon::worker::DEFAULT_MAX_TASK_BYTES)]
+    max_task_bytes: usize,
+    #[arg(long, default_value_t = timon::worker::DEFAULT_MAX_OUTPUT_BYTES)]
+    max_output_bytes: u64,
+    /// Host-wide slot directory, so delegated workers share the host limit.
+    #[arg(long, requires = "slots")]
+    slot_dir: Option<PathBuf>,
+    #[arg(long, requires = "slot_dir")]
+    slots: Option<NonZeroU16>,
+    #[arg(long, requires = "slot_dir")]
+    provisioned_slots: bool,
+    /// Admission ledger, so delegation is bounded by the run's allowance.
+    #[arg(long)]
+    run_ledger: Option<PathBuf>,
+    #[arg(long, default_value_t = 64)]
+    run_max_attempts: u32,
+    #[arg(long)]
+    run_token_ceiling: Option<u64>,
+    #[arg(long, default_value_t = timon::admission::DEFAULT_ATTEMPT_RESERVE)]
+    attempt_reserve: u64,
+    /// Where a worker's usage events are read from.
+    #[arg(long, default_value = "stdout")]
+    usage_source: String,
+    #[arg(long, value_enum, default_value_t = UsageAccounting::Delta)]
+    usage_accounting: UsageAccounting,
+    /// File a worker is told to write its result to, inside its own attempt
+    /// directory, and the schema it is held to.
+    #[arg(long)]
+    result_file: Option<String>,
+    #[arg(long, requires = "result_file")]
+    result_schema: Option<PathBuf>,
+    /// The worker command. The task is delivered on stdin, never as an argument.
+    #[arg(last = true, required = true, num_args = 1..)]
+    command: Vec<OsString>,
 }
 
 #[derive(Subcommand)]
@@ -383,8 +492,142 @@ fn run() -> Result<u8> {
         Command::Usage(command) => return usage_command(command),
         Command::Slots(SlotsCommand::Provision(args)) => return slots_provision(args),
         Command::Research(ResearchCommand::Verify(args)) => return research_verify(args),
+        Command::Mcp(args) => return mcp_serve(args),
+        Command::Orchestrate(args) => return orchestrate_run(args),
     };
     attempt_run(role, args)
+}
+
+fn orchestrate_run(args: OrchestrateArgs) -> Result<u8> {
+    let goal = if args.goal == "-" {
+        let mut buffer = String::new();
+        std::io::stdin()
+            .lock()
+            .take(args.max_task_bytes as u64)
+            .read_to_string(&mut buffer)
+            .context("failed to read the goal from stdin")?;
+        buffer
+    } else {
+        args.goal.clone()
+    };
+    if goal.trim().is_empty() {
+        bail!("the goal is empty");
+    }
+    let slots = match (&args.slot_dir, args.slots) {
+        (Some(dir), Some(limit)) => Some(SlotPool::new(
+            dir,
+            limit,
+            if args.provisioned_slots {
+                SlotMode::Provisioned
+            } else {
+                SlotMode::CreateMissing
+            },
+        )),
+        _ => None,
+    };
+    let ledger = match &args.run_ledger {
+        Some(dir) => Some(
+            Ledger::open(dir, &args.run_id)
+                .with_context(|| format!("opening {}", dir.display()))?,
+        ),
+        None => None,
+    };
+    let parse_command = |json: &str, what: &str| -> Result<Vec<OsString>> {
+        let parts: Vec<String> = serde_json::from_str(json)
+            .with_context(|| format!("--{what} must be a JSON array of strings, got {json}"))?;
+        if parts.is_empty() {
+            bail!("--{what} is empty");
+        }
+        Ok(parts.into_iter().map(OsString::from).collect())
+    };
+    let lead_command = parse_command(&args.lead_command, "lead-command")?;
+    let worker_command = parse_command(&args.worker_command, "worker-command")?;
+
+    let phases = timon::orchestrate::Phases {
+        run_id: args.run_id,
+        goal,
+        lead_command,
+        worker_command,
+        output_root: args.output_root,
+        lead_deadline: Duration::from_secs(args.lead_deadline_secs),
+        worker_deadline: Duration::from_secs(args.worker_deadline_secs),
+        max_tasks: args.max_tasks,
+        max_task_bytes: args.max_task_bytes,
+        max_output_bytes: args.max_output_bytes,
+        slots,
+        ledger,
+        limits: RunLimits {
+            max_attempts: args.run_max_attempts,
+            token_ceiling: args.run_token_ceiling,
+            attempt_reserve: args.attempt_reserve,
+        },
+        usage_source: parse_usage_source(&args.usage_source),
+        accumulation: args.usage_accounting.into(),
+        deliverable_schema: args.deliverable_schema,
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to start the async runtime")?;
+    let outcome = runtime.block_on(timon::orchestrate::run(&phases))?;
+    println!("{}", serde_json::to_string_pretty(&outcome)?);
+    if let Some(reason) = &outcome.stopped {
+        eprintln!("timon: {reason}");
+    }
+    // Non-zero when the run did not produce an answer, so a caller that only
+    // checks the status is not told a partial run succeeded.
+    Ok(if outcome.answer.is_some() {
+        0
+    } else {
+        EXIT_ATTEMPT_FAILED
+    })
+}
+
+fn mcp_serve(args: McpArgs) -> Result<u8> {
+    let slots = match (&args.slot_dir, args.slots) {
+        (Some(dir), Some(limit)) => Some(SlotPool::new(
+            dir,
+            limit,
+            if args.provisioned_slots {
+                SlotMode::Provisioned
+            } else {
+                SlotMode::CreateMissing
+            },
+        )),
+        _ => None,
+    };
+    let ledger = match &args.run_ledger {
+        Some(dir) => Some(
+            Ledger::open(dir, &args.run_id)
+                .with_context(|| format!("opening {}", dir.display()))?,
+        ),
+        None => None,
+    };
+    let policy = WorkerPolicy {
+        command: args.command,
+        run_id: args.run_id,
+        output_root: args.output_root,
+        deadline: Duration::from_secs(args.worker_deadline_secs),
+        max_task_bytes: args.max_task_bytes,
+        max_output_bytes: args.max_output_bytes,
+        slots,
+        ledger,
+        limits: RunLimits {
+            max_attempts: args.run_max_attempts,
+            token_ceiling: args.run_token_ceiling,
+            attempt_reserve: args.attempt_reserve,
+        },
+        usage_source: parse_usage_source(&args.usage_source),
+        accumulation: args.usage_accounting.into(),
+        result_file: args.result_file,
+        result_schema: args.result_schema,
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to start the async runtime")?;
+    runtime.block_on(timon::mcp::server::serve(policy))?;
+    Ok(0)
 }
 
 fn research_verify(args: VerifyArgs) -> Result<u8> {
