@@ -53,7 +53,8 @@ sudo "$LIBDIR/timon" slots provision --dir "$SLOTDIR" --slots "$SLOTS" \
 
 say "systemd units"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-for unit in timon-usage.service timon-usage-backup.service timon-usage-backup.timer; do
+for unit in timon-usage.service timon-usage-backup.service timon-usage-backup.timer \
+           timon-usage-retain.service timon-usage-retain.timer; do
   [ -f "$HERE/$unit" ] || { echo "install.sh: $HERE/$unit missing" >&2; exit 2; }
   tmp=$(mktemp)
   # The reference unit ships admin-uid 0; point it at this host's administrator.
@@ -65,6 +66,7 @@ done
 sudo systemctl daemon-reload
 sudo systemctl enable --now timon-usage.service >/dev/null
 sudo systemctl enable --now timon-usage-backup.timer >/dev/null
+sudo systemctl enable --now timon-usage-retain.timer >/dev/null
 # Only bounce the service when the binary actually changed, so re-running this
 # does not interrupt recording for no reason.
 if [ "$CHANGED" = yes ]; then
@@ -75,6 +77,7 @@ fi
 sleep 2
 say "recorder: $(systemctl is-active timon-usage.service)"
 say "backup timer: $(systemctl is-active timon-usage-backup.timer)"
+say "retention timer: $(systemctl is-active timon-usage-retain.timer) (weekly, keeps 180 days of detail)"
 echo
 say "Add each user who should be recorded to the adaptive-users group:"
 say "    sudo usermod -aG adaptive-users <user>     # takes effect at their next login"

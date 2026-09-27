@@ -1,5 +1,73 @@
 # Changelog
 
+## Unreleased
+
+### Usage detail is retained for 180 days, then rolled up
+
+Usage detail no longer accumulates forever. Individual events are kept for 180
+days; older ones become per-account, per-month totals, which are kept
+indefinitely. A monthly total answers what an account cost, while a year of event
+rows also records each individual thing that account ran, and on a shared machine
+those are different things to hold.
+
+Nothing is deleted to achieve this. `usage_events` is append-only and its
+triggers would refuse a delete, so retention builds a new database — detail still
+inside the window, plus totals for everything older — verifies that the live
+event count and token sums are identical across the boundary, and swaps the file.
+Each published database stays append-only for its whole life; history is reshaped
+only at a visible, verified, operator-initiated boundary.
+
+- `timon usage retain --keep-days 180 [--dry-run]` does the work, and
+  `timon-usage-retain.timer` runs it weekly. It refuses with **exit 75** while the
+  recorder is listening, because the daemon is the only writer and swapping the
+  file under it would leave it writing where nothing reads. A *stale* socket left
+  by a killed daemon does not block it.
+- The pre-retention database is kept beside the live one, not removed: it is the
+  only remaining copy of the detail just rolled up, so a mistaken `--keep-days` is
+  recoverable.
+- A correction chain spanning the cutoff is kept whole, so a retained correction
+  can never point at a row that was rolled up. A row a correction already
+  replaced is rolled up but not counted, exactly as a report never counted it.
+- `timon usage report` marks any window reaching back before the cutoff, in text
+  and in the CSV header. The failure this prevents is the quiet one: a total that
+  reads like a quiet month when it is really a month whose detail is gone.
+- `timon usage monthly` reads the totals, over the socket, reachable by an
+  ordinary account for its own figures — after retention it is the only way their
+  owner can still see them, and a usage figure its subject cannot see is not
+  visibility.
+- Unreported usage stays unreported: an event whose producer gave no figures is
+  rolled up as unknown rather than folded in as zero.
+
+### A reused uid no longer inherits the previous holder's history
+
+The uid is the identity — `SO_PEERCRED` reports a number and nothing else — and
+Linux reissues that number once its account is gone. Previously the runbook
+carried this as an operating rule the code could not enforce. Now
+`timon usage retire-uid` records a boundary, closing the uid's generation:
+
+- Events recorded after a boundary belong to the next generation, and the two are
+  never totalled together. A new holder of uid 1001 sees its own usage, not the
+  previous holder's, and cannot correct the previous holder's rows.
+- An administrator still sees every generation, labelled and listed separately
+  rather than summed.
+- The generation is part of the deduplication key, which matters more than it
+  first appears: `client_event_id` is derived from role, run id and attempt id
+  rather than generated, so two people sharing a recycled uid easily produce the
+  same id. Without a boundary the second event was silently dropped as a
+  duplicate, or refused as a conflict. **This was a real defect, not a
+  theoretical one.**
+- Schema v2. An existing v1 database is migrated on open by rebuilding
+  `usage_events` with the wider key, carrying ids over so corrections still
+  resolve, and aborting the whole transaction if the row count or token sum
+  changes. Pre-existing rows are generation 0: there was no boundary to place
+  them after.
+
+Recording the retirement is still the operator's job, and deliberately so.
+Nothing watches `/etc/passwd`, because a missing entry is not proof an account was
+removed — it is also what a directory service outage looks like, and guessing
+wrong would split one person's history in two. What has changed is that the rule
+is now enforceable at all, and that forgetting it is visible rather than silent.
+
 ## v0.2.0 — 2026-09-27
 
 First release with an install path. The per-account usage recorder is the part

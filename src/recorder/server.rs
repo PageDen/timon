@@ -193,6 +193,30 @@ async fn handle(
                 },
             }
         }
+        Request::Monthly {
+            from_month,
+            to_month,
+            only_uid,
+        } => {
+            let scope = match resolve_scope(only_uid, peer_uid, is_admin) {
+                Ok(scope) => scope,
+                Err(response) => return response,
+            };
+            let guard = store.lock().await;
+            match guard.monthly(scope, from_month.as_deref(), to_month.as_deref()) {
+                Ok(months) => Response::Monthly {
+                    months,
+                    scope_uid: match scope {
+                        Scope::Own(uid) => Some(uid),
+                        Scope::Admin { only_uid } => only_uid,
+                    },
+                },
+                Err(error) => Response::Error {
+                    code: ErrorCode::Storage,
+                    message: error.to_string(),
+                },
+            }
+        }
         Request::Query {
             since,
             until,

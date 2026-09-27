@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use crate::recorder::event::{LATE_AFTER_SECS, StoredEvent, UsageEvent};
 use crate::usage::TokenCount;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Result of storing one event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,10 +64,43 @@ impl From<rusqlite::Error> for AppendError {
 /// Which rows a reader may see.
 #[derive(Clone, Copy, Debug)]
 pub enum Scope {
-    /// Only this principal's rows. The uid comes from the connection.
+    /// Only this principal's rows, and only its current generation. The uid
+    /// comes from the connection.
+    ///
+    /// Restricting to the current generation is what makes a recycled uid safe
+    /// to report on: a new holder of uid 1001 sees its own usage and not the
+    /// history of whoever held 1001 before the account was retired.
     Own(u32),
-    /// Every principal's rows, or one named principal's.
+    /// Every principal's rows, across every generation, or one named
+    /// principal's. An administrator can see a retired generation; the account
+    /// that inherited its number cannot.
     Admin { only_uid: Option<u32> },
+}
+
+/// Current generation of a uid, as a scalar subquery.
+///
+/// The generation *is* the number of recorded retirements: a uid nobody has
+/// retired is generation 0, and each boundary moves it on by one. Deriving it
+/// rather than storing it in a second place means the two can never disagree.
+const CURRENT_GENERATION: &str =
+    "(SELECT COUNT(*) FROM principal_retirements r WHERE r.peer_uid = ?1)";
+
+/// The `WHERE` fragment for a scope, and the uid it binds to `?1`.
+///
+/// `prefix` is the table alias used by the caller's query, with its dot.
+fn scope_clause(scope: Scope, prefix: &str) -> (String, Option<i64>) {
+    match scope {
+        Scope::Own(uid) => (
+            format!(
+                "AND {prefix}peer_uid = ?1 AND {prefix}principal_generation = {CURRENT_GENERATION}"
+            ),
+            Some(i64::from(uid)),
+        ),
+        Scope::Admin {
+            only_uid: Some(uid),
+        } => (format!("AND {prefix}peer_uid = ?1"), Some(i64::from(uid))),
+        Scope::Admin { only_uid: None } => (String::new(), None),
+    }
 }
 
 pub struct Store {
@@ -92,10 +125,23 @@ impl Store {
     }
 
     fn migrate(&self) -> Result<(), rusqlite::Error> {
+        // Version first, and the v1 rebuild before anything else: the batch below
+        // creates an index over `principal_generation`, which a v1 table does not
+        // have yet. Creating the schema before migrating it fails on exactly the
+        // databases the migration exists for.
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);",
+        )?;
+        let recorded: Option<i64> = self
+            .conn
+            .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+            .optional()?;
+        if recorded == Some(1) {
+            self.migrate_v1_to_v2()?;
+        }
+
         self.conn.execute_batch(
             r#"
-            CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
-
             CREATE TABLE IF NOT EXISTS usage_events (
                 id                      INTEGER PRIMARY KEY AUTOINCREMENT,
                 peer_uid                INTEGER NOT NULL,
@@ -119,11 +165,18 @@ impl Store {
                 late                    INTEGER NOT NULL,
                 corrects                INTEGER REFERENCES usage_events(id),
                 client_payload          TEXT    NOT NULL,
-                UNIQUE (peer_uid, client_event_id)
+                -- Which generation of `peer_uid` this belongs to: the number of
+                -- retirements recorded for that uid when the event was stored.
+                -- Part of the dedup key because `client_event_id` is derived
+                -- from role, run id and attempt id rather than generated, so two
+                -- people who happen to share a recycled uid can easily produce
+                -- the same id and must not collide.
+                principal_generation    INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (peer_uid, principal_generation, client_event_id)
             );
 
             CREATE INDEX IF NOT EXISTS usage_events_by_principal
-                ON usage_events (peer_uid, occurred_at);
+                ON usage_events (peer_uid, principal_generation, occurred_at);
 
             -- Application-level integrity. These guard the daemon's own code
             -- paths and an operator poking at the file; they are not protection
@@ -137,18 +190,194 @@ impl Store {
             BEFORE DELETE ON usage_events BEGIN
                 SELECT RAISE(ABORT, 'usage_events is append-only');
             END;
+
+            -- A recorded boundary in one uid's history. The kernel reuses uids,
+            -- so a uid alone does not identify a person over time: when an
+            -- account is removed, a row here says so, and every event recorded
+            -- afterwards belongs to a later generation of that number. Rows on
+            -- either side of a boundary are never totalled together for the
+            -- account itself, which is what stops a new holder of uid 1001 from
+            -- reading the previous holder's usage.
+            CREATE TABLE IF NOT EXISTS principal_retirements (
+                peer_uid          INTEGER NOT NULL,
+                retired_at        INTEGER NOT NULL,
+                retired_username  TEXT,
+                note              TEXT,
+                recorded_at       INTEGER NOT NULL,
+                PRIMARY KEY (peer_uid, retired_at)
+            );
+
+            CREATE TRIGGER IF NOT EXISTS principal_retirements_no_update
+            BEFORE UPDATE ON principal_retirements BEGIN
+                SELECT RAISE(ABORT, 'principal_retirements is append-only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS principal_retirements_no_delete
+            BEFORE DELETE ON principal_retirements BEGIN
+                SELECT RAISE(ABORT, 'principal_retirements is append-only');
+            END;
+
+            -- Detail rows aged out by retention, rolled up per account, per
+            -- generation, per UTC month. Aggregates are kept after the detail
+            -- they came from is gone, because a monthly total ages far better
+            -- than an event row: it answers "what did this cost" without
+            -- holding a record of each individual thing someone ran.
+            --
+            -- Only live rows are rolled up. A row replaced by a correction is
+            -- not counted here any more than it is counted by a report, so the
+            -- two agree across the retention boundary.
+            CREATE TABLE IF NOT EXISTS usage_monthly (
+                peer_uid                  INTEGER NOT NULL,
+                principal_generation      INTEGER NOT NULL,
+                month                     TEXT    NOT NULL,
+                peer_username             TEXT,
+                events                    INTEGER NOT NULL,
+                total_tokens              INTEGER NOT NULL,
+                input_tokens              INTEGER NOT NULL,
+                output_tokens             INTEGER NOT NULL,
+                events_with_unknown_usage INTEGER NOT NULL,
+                events_with_partial_usage INTEGER NOT NULL,
+                first_occurred_at         INTEGER,
+                last_occurred_at          INTEGER,
+                rolled_up_at              INTEGER NOT NULL,
+                PRIMARY KEY (peer_uid, principal_generation, month)
+            );
+
+            -- What retention has actually done to this database. A report whose
+            -- window reaches back past `detail_from` would otherwise read as an
+            -- absence of usage rather than an absence of detail, which is the
+            -- same silent understatement the unknown-usage handling exists to
+            -- avoid.
+            CREATE TABLE IF NOT EXISTS retention_state (
+                singleton     INTEGER PRIMARY KEY CHECK (singleton = 0),
+                detail_from   INTEGER,
+                keep_days     INTEGER,
+                last_run_at   INTEGER,
+                rows_rolled   INTEGER NOT NULL DEFAULT 0
+            );
             "#,
         )?;
-        let recorded: Option<i64> = self
-            .conn
-            .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
-            .optional()?;
         if recorded.is_none() {
             self.conn.execute(
                 "INSERT INTO schema_version (version) VALUES (?1)",
                 params![SCHEMA_VERSION],
             )?;
         }
+        Ok(())
+    }
+
+    /// Rebuilds `usage_events` so the dedup key includes the generation.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` above leaves an existing v1 table alone, and
+    /// SQLite cannot alter a UNIQUE constraint in place, so the table is copied
+    /// into the new shape and swapped. This is the one code path that removes
+    /// rows from an append-only table, which is why it counts them first and
+    /// aborts the whole transaction if the copy is not exact: a migration that
+    /// silently dropped usage would destroy the record it exists to preserve.
+    ///
+    /// `DROP TABLE` does not fire row triggers, so the append-only guards do not
+    /// need lifting to do this.
+    fn migrate_v1_to_v2(&self) -> Result<(), rusqlite::Error> {
+        let tx_sql = r#"
+            CREATE TABLE usage_events_v2 (
+                id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                peer_uid                INTEGER NOT NULL,
+                peer_username           TEXT,
+                client_event_id         TEXT    NOT NULL,
+                run_id                  TEXT    NOT NULL,
+                attempt_id              TEXT    NOT NULL,
+                role                    TEXT    NOT NULL,
+                provider                TEXT,
+                model                   TEXT,
+                profile                 TEXT,
+                input_tokens            INTEGER,
+                cached_input_tokens     INTEGER,
+                output_tokens           INTEGER,
+                reasoning_output_tokens INTEGER,
+                total_tokens            INTEGER,
+                usage_status            TEXT    NOT NULL,
+                duration_ms             INTEGER,
+                occurred_at             INTEGER NOT NULL,
+                received_at             INTEGER NOT NULL,
+                late                    INTEGER NOT NULL,
+                corrects                INTEGER REFERENCES usage_events_v2(id),
+                client_payload          TEXT    NOT NULL,
+                principal_generation    INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (peer_uid, principal_generation, client_event_id)
+            );
+
+            -- Ids are carried over, not reassigned, so `corrects` keeps pointing
+            -- at the row it corrects. Every pre-existing row is generation 0:
+            -- nothing was retired before this column existed, so there is no
+            -- boundary to place them after.
+            INSERT INTO usage_events_v2 (
+                id, peer_uid, peer_username, client_event_id, run_id, attempt_id,
+                role, provider, model, profile,
+                input_tokens, cached_input_tokens, output_tokens,
+                reasoning_output_tokens, total_tokens,
+                usage_status, duration_ms, occurred_at, received_at, late,
+                corrects, client_payload, principal_generation
+            )
+            SELECT
+                id, peer_uid, peer_username, client_event_id, run_id, attempt_id,
+                role, provider, model, profile,
+                input_tokens, cached_input_tokens, output_tokens,
+                reasoning_output_tokens, total_tokens,
+                usage_status, duration_ms, occurred_at, received_at, late,
+                corrects, client_payload, 0
+            FROM usage_events;
+        "#;
+
+        let tx = self.conn.unchecked_transaction().and_then(|tx| {
+            tx.execute_batch("PRAGMA defer_foreign_keys = ON;")?;
+            Ok(tx)
+        })?;
+
+        let before: (i64, i64) = tx.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0) FROM usage_events",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        tx.execute_batch(tx_sql)?;
+        let after: (i64, i64) = tx.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0) FROM usage_events_v2",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if before != after {
+            // Rolled back by the drop below never running: returning here drops
+            // the transaction, which rolls it back.
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+                Some(format!(
+                    "migration would have changed the record: {} rows and {} tokens before, \
+                 {} rows and {} tokens after",
+                    before.0, before.1, after.0, after.1
+                )),
+            ));
+        }
+
+        tx.execute_batch(
+            r#"
+            DROP TABLE usage_events;
+            ALTER TABLE usage_events_v2 RENAME TO usage_events;
+
+            CREATE INDEX IF NOT EXISTS usage_events_by_principal
+                ON usage_events (peer_uid, principal_generation, occurred_at);
+
+            CREATE TRIGGER IF NOT EXISTS usage_events_no_update
+            BEFORE UPDATE ON usage_events BEGIN
+                SELECT RAISE(ABORT, 'usage_events is append-only');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS usage_events_no_delete
+            BEFORE DELETE ON usage_events BEGIN
+                SELECT RAISE(ABORT, 'usage_events is append-only');
+            END;
+            "#,
+        )?;
+        tx.execute("UPDATE schema_version SET version = ?1", params![2])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -170,7 +399,12 @@ impl Store {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-        if let Some((id, stored)) = existing(&tx, peer_uid, &event.client_event_id)? {
+        // Resolved inside the transaction that stores the row, so a retirement
+        // recorded concurrently cannot land the event in a generation that was
+        // current when the request arrived but is not when it commits.
+        let generation = generation_now(&tx, peer_uid)?;
+
+        if let Some((id, stored)) = existing(&tx, peer_uid, generation, &event.client_event_id)? {
             // Server-stamped metadata is deliberately outside the comparison, so
             // a replay that arrives later is still recognised as the same event.
             return if stored == payload {
@@ -185,16 +419,18 @@ impl Store {
         }
 
         if let Some(corrects) = event.corrects {
-            let owner: Option<i64> = tx
+            let owner: Option<(i64, i64)> = tx
                 .query_row(
-                    "SELECT peer_uid FROM usage_events WHERE id = ?1",
+                    "SELECT peer_uid, principal_generation FROM usage_events WHERE id = ?1",
                     params![corrects],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
             // Correcting across principals would let one account rewrite
             // another's totals, which is the one thing identity is here to stop.
-            if owner != Some(i64::from(peer_uid)) {
+            // The generation is part of that: inheriting a recycled uid must not
+            // carry the right to rewrite the previous holder's figures.
+            if owner != Some((i64::from(peer_uid), i64::from(generation))) {
                 return Err(AppendError::UncorrectableTarget { corrects });
             }
         }
@@ -208,14 +444,14 @@ impl Store {
                 input_tokens, cached_input_tokens, output_tokens,
                 reasoning_output_tokens, total_tokens,
                 usage_status, duration_ms, occurred_at, received_at, late, corrects,
-                client_payload
+                client_payload, principal_generation
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6,
                 ?7, ?8, ?9,
                 ?10, ?11, ?12,
                 ?13, ?14,
                 ?15, ?16, ?17, ?18, ?19, ?20,
-                ?21
+                ?21, ?22
             )
             "#,
             params![
@@ -240,6 +476,7 @@ impl Store {
                 late as i64,
                 event.corrects,
                 payload,
+                i64::from(generation),
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -264,13 +501,7 @@ impl Store {
     ) -> Result<Vec<StoredEvent>, rusqlite::Error> {
         // The uid filter is applied here, in the only place that reads rows, so
         // no caller can reach another principal's data by crafting a request.
-        let (uid_clause, uid_param): (&str, Option<i64>) = match scope {
-            Scope::Own(uid) => ("AND peer_uid = ?1", Some(i64::from(uid))),
-            Scope::Admin {
-                only_uid: Some(uid),
-            } => ("AND peer_uid = ?1", Some(i64::from(uid))),
-            Scope::Admin { only_uid: None } => ("", None),
-        };
+        let (uid_clause, uid_param) = scope_clause(scope, "");
         let sql = format!(
             r#"
             SELECT id, peer_uid, peer_username, client_event_id, run_id, attempt_id, role,
@@ -319,14 +550,26 @@ impl Store {
 fn existing(
     tx: &Transaction<'_>,
     peer_uid: u32,
+    generation: u32,
     client_event_id: &str,
 ) -> Result<Option<(i64, String)>, rusqlite::Error> {
     tx.query_row(
-        "SELECT id, client_payload FROM usage_events WHERE peer_uid = ?1 AND client_event_id = ?2",
-        params![peer_uid, client_event_id],
+        "SELECT id, client_payload FROM usage_events \
+         WHERE peer_uid = ?1 AND principal_generation = ?2 AND client_event_id = ?3",
+        params![peer_uid, generation, client_event_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
+}
+
+/// How many times this uid has been retired, which is its current generation.
+fn generation_now(tx: &Transaction<'_>, peer_uid: u32) -> Result<u32, rusqlite::Error> {
+    let count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM principal_retirements WHERE peer_uid = ?1",
+        params![peer_uid],
+        |row| row.get(0),
+    )?;
+    Ok(count as u32)
 }
 
 /// A stored NULL means the producer never reported the number.
@@ -389,11 +632,19 @@ pub struct Totals {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct PrincipalTotals {
     pub peer_uid: u32,
+    /// Which generation of `peer_uid` these totals belong to. Generations are
+    /// never summed together: a uid recycled after an account was removed is two
+    /// different people, and adding their figures up would be the exact error
+    /// the boundary exists to prevent.
+    pub principal_generation: u32,
     /// Latest name seen for this uid. Display only; the number is the identity.
     pub username: Option<String>,
-    /// More than one name has been seen for this uid. A rename is the ordinary
-    /// cause; a recycled uid is the one that would merge two people's history,
-    /// which is why the deployment must not recycle one while records are kept.
+    /// More than one name has been seen for this uid *within this generation*. A
+    /// rename is the ordinary cause. A recycled uid used to be the alarming one,
+    /// because it merged two people's history; recording a retirement boundary
+    /// now separates them, so this is a rename signal rather than a warning. It
+    /// stays reported because an operator who recycles a uid *without* recording
+    /// the retirement still has the old problem, and this is how it shows.
     pub names_seen: u64,
     pub events: u64,
     pub total_tokens: u64,
@@ -423,6 +674,17 @@ pub struct Report {
     /// Rows left out because a later correction replaces them. Each correction
     /// is applied once; it is not an additional charge on top of the original.
     pub superseded_by_corrections: u64,
+    /// The instant from which detail is complete, when retention has pruned
+    /// anything. `None` means no detail has ever been pruned, so the window is
+    /// covered in full.
+    ///
+    /// This is retention's cutoff rather than the oldest surviving row: some
+    /// older rows can survive as part of a correction chain, and treating those
+    /// as coverage would overstate what the database can answer.
+    pub detail_from: Option<i64>,
+    /// Set when the requested window reaches back before `detail_from`, so a
+    /// pruned stretch cannot be read as a stretch where nobody ran anything.
+    pub detail_incomplete: bool,
     /// Always carried with the numbers so a consumer cannot drop them.
     pub basis: String,
     pub quota_note: String,
@@ -448,13 +710,7 @@ impl Store {
         since: Option<i64>,
         until: Option<i64>,
     ) -> Result<Report, rusqlite::Error> {
-        let (uid_clause, uid_param): (&str, Option<i64>) = match scope {
-            Scope::Own(uid) => ("AND e.peer_uid = ?1", Some(i64::from(uid))),
-            Scope::Admin {
-                only_uid: Some(uid),
-            } => ("AND e.peer_uid = ?1", Some(i64::from(uid))),
-            Scope::Admin { only_uid: None } => ("", None),
-        };
+        let (uid_clause, uid_param) = scope_clause(scope, "e.");
         // A row replaced by a correction is excluded, so the correction counts
         // instead of adding to it. Chains resolve naturally: only the row nobody
         // corrects survives.
@@ -470,8 +726,11 @@ impl Store {
         let sql = format!(
             r#"
             SELECT e.peer_uid,
+                   e.principal_generation,
                    (SELECT u.peer_username FROM usage_events u
-                     WHERE u.peer_uid = e.peer_uid ORDER BY u.id DESC LIMIT 1),
+                     WHERE u.peer_uid = e.peer_uid
+                       AND u.principal_generation = e.principal_generation
+                     ORDER BY u.id DESC LIMIT 1),
                    COUNT(DISTINCT e.peer_username),
                    COUNT(*),
                    COALESCE(SUM(e.total_tokens), 0),
@@ -484,8 +743,8 @@ impl Store {
                    MIN(e.occurred_at),
                    MAX(e.occurred_at)
             {live}
-            GROUP BY e.peer_uid
-            ORDER BY e.peer_uid
+            GROUP BY e.peer_uid, e.principal_generation
+            ORDER BY e.peer_uid, e.principal_generation
             "#
         );
         let mut statement = self.conn.prepare(&sql)?;
@@ -493,18 +752,19 @@ impl Store {
             .query_map(params![uid_param, since, until], |row| {
                 Ok(PrincipalTotals {
                     peer_uid: row.get::<_, i64>(0)? as u32,
-                    username: row.get(1)?,
-                    names_seen: row.get::<_, i64>(2)? as u64,
-                    events: row.get::<_, i64>(3)? as u64,
-                    total_tokens: row.get::<_, i64>(4)? as u64,
-                    input_tokens: row.get::<_, i64>(5)? as u64,
-                    output_tokens: row.get::<_, i64>(6)? as u64,
-                    events_with_unknown_usage: row.get::<_, i64>(7)? as u64,
-                    events_with_partial_usage: row.get::<_, i64>(8)? as u64,
-                    late_events: row.get::<_, i64>(9)? as u64,
-                    corrections_applied: row.get::<_, i64>(10)? as u64,
-                    first_occurred_at: row.get(11)?,
-                    last_occurred_at: row.get(12)?,
+                    principal_generation: row.get::<_, i64>(1)? as u32,
+                    username: row.get(2)?,
+                    names_seen: row.get::<_, i64>(3)? as u64,
+                    events: row.get::<_, i64>(4)? as u64,
+                    total_tokens: row.get::<_, i64>(5)? as u64,
+                    input_tokens: row.get::<_, i64>(6)? as u64,
+                    output_tokens: row.get::<_, i64>(7)? as u64,
+                    events_with_unknown_usage: row.get::<_, i64>(8)? as u64,
+                    events_with_partial_usage: row.get::<_, i64>(9)? as u64,
+                    late_events: row.get::<_, i64>(10)? as u64,
+                    corrections_applied: row.get::<_, i64>(11)? as u64,
+                    first_occurred_at: row.get(12)?,
+                    last_occurred_at: row.get(13)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -525,6 +785,16 @@ impl Store {
                     row.get(0)
                 })?;
 
+        let detail_from = self.detail_from()?;
+        // A window that starts before the retention cutoff is partly answered by
+        // rows that no longer exist. Saying so is the point: the alternative is a
+        // total that looks like a quiet month.
+        let detail_incomplete = match (detail_from, since) {
+            (Some(from), Some(since)) => since < from,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+
         Ok(Report {
             since,
             until,
@@ -534,9 +804,228 @@ impl Store {
             },
             principals,
             superseded_by_corrections: superseded as u64,
+            detail_from,
+            detail_incomplete,
             basis: VISIBILITY_LABEL.to_string(),
             quota_note: SHARED_QUOTA_LABEL.to_string(),
         })
+    }
+
+    /// Earliest `occurred_at` still held as detail, if retention has run.
+    pub fn detail_from(&self) -> Result<Option<i64>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT detail_from FROM retention_state WHERE singleton = 0",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
+    }
+}
+
+/// A recorded boundary in one uid's history.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct Retirement {
+    pub peer_uid: u32,
+    /// Everything this uid recorded at or before this instant belongs to the
+    /// generation that ended here.
+    pub retired_at: i64,
+    /// Who held the uid when it was retired, for a human reading the log later.
+    pub retired_username: Option<String>,
+    pub note: Option<String>,
+    pub recorded_at: i64,
+    /// Generation this boundary closed.
+    pub generation: u32,
+}
+
+/// Why a retirement was not recorded.
+#[derive(Debug)]
+pub enum RetireError {
+    /// A boundary already exists at this instant for this uid. Recording the
+    /// same retirement twice would invent a generation nobody used.
+    AlreadyRecorded {
+        peer_uid: u32,
+        retired_at: i64,
+    },
+    Sql(rusqlite::Error),
+}
+
+impl std::fmt::Display for RetireError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RetireError::AlreadyRecorded {
+                peer_uid,
+                retired_at,
+            } => write!(
+                f,
+                "uid {peer_uid} already has a retirement recorded at {retired_at}"
+            ),
+            RetireError::Sql(error) => write!(f, "database error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for RetireError {}
+
+impl From<rusqlite::Error> for RetireError {
+    fn from(error: rusqlite::Error) -> Self {
+        RetireError::Sql(error)
+    }
+}
+
+impl Store {
+    /// Records that a uid's account has been removed, closing its generation.
+    ///
+    /// This is the operator's half of the uid-reuse contract: the kernel will
+    /// hand the number out again, and nothing in the database can detect that on
+    /// its own, because a uid is all `SO_PEERCRED` reports. Recording the
+    /// boundary is what keeps the next holder's usage separate from this one's.
+    ///
+    /// Deliberately not automatic. Nothing here watches `/etc/passwd`, because a
+    /// missing passwd entry is not proof an account was removed — it is also what
+    /// a mounted-elsewhere home directory or a directory service outage looks
+    /// like, and guessing wrong would split one person's history in two.
+    pub fn retire_principal(
+        &mut self,
+        peer_uid: u32,
+        retired_username: Option<&str>,
+        note: Option<&str>,
+        retired_at: i64,
+    ) -> Result<Retirement, RetireError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let already: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM principal_retirements WHERE peer_uid = ?1 AND retired_at = ?2",
+                params![peer_uid, retired_at],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if already.is_some() {
+            return Err(RetireError::AlreadyRecorded {
+                peer_uid,
+                retired_at,
+            });
+        }
+        let generation = generation_now(&tx, peer_uid)?;
+        let recorded_at = now_secs();
+        tx.execute(
+            "INSERT INTO principal_retirements \
+             (peer_uid, retired_at, retired_username, note, recorded_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![peer_uid, retired_at, retired_username, note, recorded_at],
+        )?;
+        tx.commit()?;
+        Ok(Retirement {
+            peer_uid,
+            retired_at,
+            retired_username: retired_username.map(str::to_string),
+            note: note.map(str::to_string),
+            recorded_at,
+            generation,
+        })
+    }
+
+    /// Every recorded boundary, oldest first.
+    pub fn retirements(&self, only_uid: Option<u32>) -> Result<Vec<Retirement>, rusqlite::Error> {
+        let mut statement = self.conn.prepare(
+            "SELECT peer_uid, retired_at, retired_username, note, recorded_at, \
+                    (SELECT COUNT(*) FROM principal_retirements e \
+                      WHERE e.peer_uid = r.peer_uid AND e.retired_at < r.retired_at) \
+             FROM principal_retirements r \
+             WHERE (?1 IS NULL OR peer_uid = ?1) \
+             ORDER BY peer_uid, retired_at",
+        )?;
+        statement
+            .query_map(params![only_uid], |row| {
+                Ok(Retirement {
+                    peer_uid: row.get::<_, i64>(0)? as u32,
+                    retired_at: row.get(1)?,
+                    retired_username: row.get(2)?,
+                    note: row.get(3)?,
+                    recorded_at: row.get(4)?,
+                    generation: row.get::<_, i64>(5)? as u32,
+                })
+            })?
+            .collect()
+    }
+
+    /// The current generation of a uid.
+    pub fn current_generation(&self, peer_uid: u32) -> Result<u32, rusqlite::Error> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM principal_retirements WHERE peer_uid = ?1",
+            params![peer_uid],
+            |row| row.get(0),
+        )?;
+        Ok(count as u32)
+    }
+}
+
+/// One account's rolled-up total for one UTC month.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct MonthlyTotals {
+    pub peer_uid: u32,
+    pub principal_generation: u32,
+    /// `YYYY-MM`, UTC.
+    pub month: String,
+    pub peer_username: Option<String>,
+    pub events: u64,
+    pub total_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub events_with_unknown_usage: u64,
+    pub events_with_partial_usage: u64,
+    pub first_occurred_at: Option<i64>,
+    pub last_occurred_at: Option<i64>,
+    pub rolled_up_at: i64,
+}
+
+impl Store {
+    /// Rolled-up months the caller may see.
+    ///
+    /// These outlive the detail they were built from, which is the point: a
+    /// monthly total answers what an account cost without keeping a record of
+    /// each individual thing that account ran.
+    pub fn monthly(
+        &self,
+        scope: Scope,
+        from_month: Option<&str>,
+        to_month: Option<&str>,
+    ) -> Result<Vec<MonthlyTotals>, rusqlite::Error> {
+        let (uid_clause, uid_param) = scope_clause(scope, "");
+        let sql = format!(
+            "SELECT peer_uid, principal_generation, month, peer_username, events, \
+                    total_tokens, input_tokens, output_tokens, \
+                    events_with_unknown_usage, events_with_partial_usage, \
+                    first_occurred_at, last_occurred_at, rolled_up_at \
+             FROM usage_monthly \
+             WHERE 1 = 1 {uid_clause} \
+               AND (?2 IS NULL OR month >= ?2) \
+               AND (?3 IS NULL OR month <= ?3) \
+             ORDER BY peer_uid, principal_generation, month"
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        statement
+            .query_map(params![uid_param, from_month, to_month], |row| {
+                Ok(MonthlyTotals {
+                    peer_uid: row.get::<_, i64>(0)? as u32,
+                    principal_generation: row.get::<_, i64>(1)? as u32,
+                    month: row.get(2)?,
+                    peer_username: row.get(3)?,
+                    events: row.get::<_, i64>(4)? as u64,
+                    total_tokens: row.get::<_, i64>(5)? as u64,
+                    input_tokens: row.get::<_, i64>(6)? as u64,
+                    output_tokens: row.get::<_, i64>(7)? as u64,
+                    events_with_unknown_usage: row.get::<_, i64>(8)? as u64,
+                    events_with_partial_usage: row.get::<_, i64>(9)? as u64,
+                    first_occurred_at: row.get(10)?,
+                    last_occurred_at: row.get(11)?,
+                    rolled_up_at: row.get(12)?,
+                })
+            })?
+            .collect()
     }
 }
 

@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::recorder::db::{Report, Totals};
+use crate::recorder::db::{MonthlyTotals, Report, Totals};
 use crate::recorder::event::{StoredEvent, UsageEvent};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -17,6 +17,20 @@ pub enum Request {
         since: Option<i64>,
         #[serde(default)]
         until: Option<i64>,
+        #[serde(default)]
+        only_uid: Option<u32>,
+    },
+    /// Rolled-up monthly totals, which outlive the detail they came from.
+    ///
+    /// Reachable by an ordinary account for its own figures, deliberately: once
+    /// retention has rolled a month up, this is the only way its owner can still
+    /// see what it cost, and a usage figure a person cannot see is not
+    /// visibility.
+    Monthly {
+        #[serde(default)]
+        from_month: Option<String>,
+        #[serde(default)]
+        to_month: Option<String>,
         #[serde(default)]
         only_uid: Option<u32>,
     },
@@ -50,6 +64,11 @@ pub enum Response {
     },
     Report {
         report: Box<Report>,
+    },
+    Monthly {
+        months: Vec<MonthlyTotals>,
+        /// Whose totals these are. `null` means every principal.
+        scope_uid: Option<u32>,
     },
     Rows {
         rows: Vec<StoredEvent>,

@@ -291,9 +291,11 @@ pub async fn deliver(socket: &Path, spool: &Spool, event: &UsageEvent) -> Delive
         },
         // Neither can answer an append; treat it as a failed delivery rather
         // than assuming the event landed.
-        Ok(Response::Rows { .. } | Response::Report { .. }) => Delivery::Spooled {
-            reason: "the recorder answered an append with a read reply".to_string(),
-        },
+        Ok(Response::Rows { .. } | Response::Report { .. } | Response::Monthly { .. }) => {
+            Delivery::Spooled {
+                reason: "the recorder answered an append with a read reply".to_string(),
+            }
+        }
         Err(error) => Delivery::Spooled {
             reason: format!("the recorder is unreachable: {error:#}"),
         },

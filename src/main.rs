@@ -17,6 +17,7 @@ use timon::recorder::producer::{
 };
 use timon::recorder::protocol::{Request, Response};
 use timon::recorder::render;
+use timon::recorder::retain::{self, DEFAULT_KEEP_DAYS};
 use timon::recorder::server::{Config as RecorderConfig, serve as serve_recorder};
 use timon::research::verify::{self, Findings};
 use timon::usage::Accumulation;
@@ -235,6 +236,73 @@ enum UsageCommand {
     Backup(BackupArgs),
     /// Put a verified snapshot back in place.
     Restore(RestoreArgs),
+    /// Read rolled-up monthly totals, which outlive the detail behind them.
+    Monthly(MonthlyArgs),
+    /// Roll detail older than the retention window into monthly totals.
+    Retain(RetainArgs),
+    /// Record that an account was removed, so the next holder of its uid starts
+    /// a new generation instead of inheriting its history.
+    RetireUid(RetireUidArgs),
+}
+
+#[derive(Args)]
+struct MonthlyArgs {
+    #[arg(long)]
+    socket: PathBuf,
+    /// One account. Allowed only for a configured administrator, or when it is
+    /// the caller's own uid.
+    #[arg(long)]
+    only_uid: Option<u32>,
+    /// Earliest month, `YYYY-MM`.
+    #[arg(long)]
+    from_month: Option<String>,
+    /// Latest month, `YYYY-MM`.
+    #[arg(long)]
+    to_month: Option<String>,
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    format: ReportFormat,
+}
+
+#[derive(Args)]
+struct RetainArgs {
+    /// The live database. Opened directly, so run this as the service account
+    /// that owns it.
+    #[arg(long)]
+    database: PathBuf,
+    /// Days of individual events to keep. Older ones become monthly totals.
+    #[arg(long, default_value_t = DEFAULT_KEEP_DAYS)]
+    keep_days: u32,
+    /// The daemon's socket. Checked first: the daemon is the only writer, and
+    /// swapping the file under it would leave it writing where nothing reads.
+    /// Omit only when you have stopped it by other means and know it is down.
+    #[arg(long)]
+    socket: Option<PathBuf>,
+    /// Report what would change, and change nothing.
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    format: ReportFormat,
+}
+
+#[derive(Args)]
+struct RetireUidArgs {
+    /// The live database. Opened directly, so run this as the service account
+    /// that owns it.
+    #[arg(long)]
+    database: PathBuf,
+    /// The uid whose account has been removed.
+    #[arg(long)]
+    uid: u32,
+    /// Who held it, recorded so the log is readable later.
+    #[arg(long)]
+    username: Option<String>,
+    /// Why, in a few words.
+    #[arg(long)]
+    note: Option<String>,
+    /// When the account was removed, in Unix seconds. Defaults to now. Events
+    /// recorded after this belong to the next generation of the uid.
+    #[arg(long)]
+    at: Option<i64>,
 }
 
 #[derive(Args)]
@@ -729,7 +797,89 @@ fn usage_command(command: UsageCommand) -> Result<u8> {
         UsageCommand::Replay(args) => runtime.block_on(usage_replay(args)),
         UsageCommand::Backup(args) => usage_backup(args),
         UsageCommand::Restore(args) => usage_restore(args),
+        UsageCommand::Monthly(args) => runtime.block_on(usage_monthly(args)),
+        UsageCommand::Retain(args) => usage_retain(args),
+        UsageCommand::RetireUid(args) => usage_retire_uid(args),
     }
+}
+
+async fn usage_monthly(args: MonthlyArgs) -> Result<u8> {
+    let response = recorder_send(
+        &args.socket,
+        &Request::Monthly {
+            from_month: args.from_month,
+            to_month: args.to_month,
+            only_uid: args.only_uid,
+        },
+    )
+    .await?;
+    match response {
+        Response::Monthly { months, scope_uid } => {
+            match args.format {
+                ReportFormat::Text => print!("{}", render::monthly_text(&months, scope_uid)),
+                ReportFormat::Csv => print!("{}", render::monthly_csv(&months)),
+                ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&months)?),
+            }
+            Ok(0)
+        }
+        other => print_response(&other),
+    }
+}
+
+fn usage_retain(args: RetainArgs) -> Result<u8> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default();
+    let report = match retain::retain(
+        &args.database,
+        args.keep_days,
+        now,
+        args.socket.as_deref(),
+        args.dry_run,
+    ) {
+        Ok(report) => report,
+        // Exit 75 for a live daemon: the work was refused for a reason that will
+        // pass, which is temporary failure rather than misuse.
+        Err(error @ retain::RetainError::DaemonLive(_)) => {
+            eprintln!("timon: {error}");
+            return Ok(75);
+        }
+        Err(error) => return Err(anyhow::anyhow!("{error}")),
+    };
+    match args.format {
+        ReportFormat::Text | ReportFormat::Csv => {
+            print!("{}", render::retention_text(&report, args.dry_run))
+        }
+        ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+    }
+    Ok(0)
+}
+
+fn usage_retire_uid(args: RetireUidArgs) -> Result<u8> {
+    let at = args.at.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_default()
+    });
+    let mut store = Store::open(&args.database)
+        .with_context(|| format!("opening {}", args.database.display()))?;
+    let recorded = store
+        .retire_principal(args.uid, args.username.as_deref(), args.note.as_deref(), at)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    println!(
+        "uid {} retired at {}; generation {} is closed and new events belong to generation {}",
+        recorded.peer_uid,
+        render::utc(recorded.retired_at),
+        recorded.generation,
+        recorded.generation + 1
+    );
+    println!(
+        "Existing rows are untouched. Reports for this uid no longer total the closed \n\
+         generation together with the next one, and an administrator can still see both."
+    );
+    Ok(0)
 }
 
 async fn usage_daemon(args: DaemonArgs) -> Result<u8> {
