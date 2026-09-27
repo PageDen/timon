@@ -15,14 +15,15 @@ STRONG="${STRONG:-gpt-6-astra}"
 CHEAP="${CHEAP:-gpt-5.5}"
 
 mkdir -p "$OUT"; chmod 700 "$OUT"
-cat > "$OUT/deliverable.json" <<'S'
-{"type":"object","additionalProperties":false,"required":["claims","unsupported"],
- "properties":{"claims":{"type":"array","items":{"type":"object","additionalProperties":false,
- "required":["text","kind","source_urls","evidence"],"properties":{"text":{"type":"string"},
- "kind":{"type":"string","enum":["sourced","inference"]},
- "source_urls":{"type":"array","items":{"type":"string"}},"evidence":{"type":"string"}}}},
- "unsupported":{"type":"array","items":{"type":"string"}}}}
-S
+# Each schema the suite declares, written out once. A single shared schema was a
+# bug: it forced every task into {claims, unsupported}, which an extraction task
+# cannot satisfy.
+python3 - "$SUITE" "$OUT" <<'PY'
+import json, sys
+suite, out = json.load(open(sys.argv[1])), sys.argv[2]
+for name, schema in suite["schemas"].items():
+    json.dump(schema, open(f"{out}/schema-{name}.json", "w"))
+PY
 
 echo "arm,task,ok,seconds,lead_tokens,worker_tokens,total_tokens,reason" > "$OUT/results.csv"
 
@@ -31,12 +32,13 @@ for i in $(seq 0 $((n-1))); do
   task=$(python3 -c "import json;print(json.dumps(json.load(open('$SUITE'))['tasks'][$i]))")
   id=$(python3 -c "import json;print(json.loads('''$task''')['id'])" 2>/dev/null || echo "t$i")
   goal=$(python3 -c "import json,sys;print(json.loads(sys.stdin.read())['goal'])" <<<"$task")
+  schema="$OUT/schema-$(python3 -c "import json,sys;print(json.loads(sys.stdin.read())['schema'])" <<<"$task").json"
 
   # ---- arm: orchestrated (strong lead plans, cheap workers, strong lead integrates)
   d="$OUT/$id/orchestrated"; mkdir -p "$d"; chmod 700 "$d"
   start=$(date +%s.%N)
   timeout 1200 "$T" orchestrate --run-id "eval-$id" --goal "$goal" \
-    --output-root "$d/run" --max-tasks 3 --deliverable-schema "$OUT/deliverable.json" \
+    --output-root "$d/run" --max-tasks 3 --deliverable-schema "$schema" \
     --lead-deadline-secs 300 --worker-deadline-secs 300 --usage-source stdout \
     --run-ledger "$d/led" --run-token-ceiling 900000 --attempt-reserve 60000 \
     --lead-command "[\"$CX\",\"exec\",\"-m\",\"$STRONG\",\"-s\",\"read-only\",\"--skip-git-repo-check\",\"--json\",\"-o\",\"{result}\",\"--output-schema\",\"{schema}\",\"-\"]" \
@@ -70,7 +72,7 @@ PY
     start=$(date +%s.%N)
     printf '%s\n\nReply with JSON only, matching the schema you were given.' "$goal" | \
       timeout 600 "$CX" --search exec -m "$model" -s read-only --skip-git-repo-check --json \
-        -o "$d/result.json" --output-schema "$OUT/deliverable.json" - > "$d/stream.jsonl" 2>"$d/err.txt"
+        -o "$d/result.json" --output-schema "$schema" - > "$d/stream.jsonl" 2>"$d/err.txt"
     secs=$(python3 -c "print(f'{$(date +%s.%N)-$start:.1f}')")
     python3 - "$task" "$d" "$secs" "$OUT/results.csv" "$arm" <<'PY'
 import json, sys
