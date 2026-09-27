@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### The cost counter was cross-checked, and holds
+
+The pilot's cost ratio divides numbers produced by two different instruments:
+`run-pilot.sh` took the single-model arms' totals from inline Python summing
+`turn.completed` usage, and the orchestrated arm's from Timon's own adapter via
+`outcome.json`. If those disagreed about cached input, reasoning tokens or
+startup prewarm, the ratio would be a property of the instruments rather than of
+the models — and after the citation verifier and the success rubric were both
+found broken on first contact with real output, this was the last load-bearing
+instrument never checked against an independent computation on real data.
+
+`eval/cross-check-counters.py` checks both halves over the bytes already on disk,
+replaying each saved stream through `timon worker run` so the real adapter runs
+rather than a reimplementation of it. **33 comparisons, zero disagreements**, to
+the token. The cost finding is not an instrument artefact.
+
+One bound on that result, reported by the script rather than left implicit: every
+one of the 59 real streams reports exactly one `turn.completed`, so this data
+cannot distinguish `delta` from `cumulative` accounting — with a single turn the
+two are the same arithmetic. The accumulation path has synthetic coverage in
+`tests/usage.rs` but has never met real Codex output. If a workload ever produces
+a multi-turn stream, which mode Codex uses becomes load-bearing, and the default
+is an assumption rather than an observation.
+
+
 ### The success rubric was validated against the pilot's saved answers, and was wrong
 
 The rubric was repaired after a harness fault voided the pilot's quality
