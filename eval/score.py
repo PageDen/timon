@@ -85,14 +85,14 @@ def score(task, answer):
     report, error = verify_citations(answer)
     if error:
         return False, [f"citations could not be checked: {error}"]
-    supported = report.get("supported", 0)
+    supported = report.get("quotation_present", 0)
     needed = task.get("min_sourced_claims", 1)
     if supported < needed:
         return False, [
-            f"only {supported} of {needed} required claim(s) verified against their page "
+            f"only {supported} of {needed} required claim(s) had their quotation found on the page "
             f"({report.get('unsupported', 0)} unsupported, {report.get('unverifiable', 0)} unverifiable)"
         ]
-    reasons.append(f"{supported} claim(s) verified against the pages they cite")
+    reasons.append(f"{supported} claim(s) had their quotation found on the cited page")
     return True, reasons
 
 

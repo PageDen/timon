@@ -216,8 +216,8 @@ fn unverifiable_is_never_counted_as_a_pass() {
     };
     let report = verify::check(&findings, Duration::from_millis(600));
 
-    assert_eq!(report.supported, 0);
-    assert!(!report.all_sourced_claims_supported);
+    assert_eq!(report.quotation_present, 0);
+    assert!(!report.all_sourced_claims_quoted);
     assert!(
         report.unverifiable + report.unsupported == 1,
         "one claim, not verified: {report:?}"
@@ -234,7 +234,7 @@ fn findings_with_nothing_to_check_do_not_pass() {
     };
     let report = verify::check(&findings, QUICK);
     assert!(
-        !report.all_sourced_claims_supported,
+        !report.all_sourced_claims_quoted,
         "demonstrating nothing is not the same as demonstrating support"
     );
 }
@@ -248,8 +248,16 @@ fn the_report_says_what_a_check_does_and_does_not_establish() {
         },
         QUICK,
     );
-    assert!(report.basis.contains("not that the page is correct"));
-    assert!(report.basis.contains("nor that the claim follows from it"));
+    assert!(
+        report
+            .basis
+            .contains("does not establish that the page is correct")
+    );
+    assert!(
+        report
+            .basis
+            .contains("that the claim follows from the passage")
+    );
 }
 
 #[test]
@@ -286,7 +294,7 @@ fn one_unsupported_claim_is_enough_to_fail_a_set() {
     };
     let report = verify::check(&findings, QUICK);
 
-    assert!(!report.all_sourced_claims_supported);
+    assert!(!report.all_sourced_claims_quoted);
     assert_eq!(report.unsupported, 1);
 }
 
@@ -301,7 +309,7 @@ fn an_inference_alongside_a_supported_claim_does_not_drag_the_set_down() {
     };
     let report = verify::check(&findings, QUICK);
     assert_eq!(report.unsupported, 0);
-    assert_eq!(report.supported, 0);
+    assert_eq!(report.quotation_present, 0);
 }
 
 #[test]
@@ -411,4 +419,71 @@ fn a_version_quoted_from_a_table_is_found_despite_the_markup() {
 /// Mirrors the crate's own normalisation so these tests compare like with like.
 fn normalise_for_test(text: &str) -> String {
     verify::normalise_for_test(text)
+}
+
+// --- what a quotation check does not establish ------------------------------
+
+#[test]
+fn a_claim_that_contradicts_its_own_genuine_quotation_is_not_reported_as_supported() {
+    // Raised in Codex's review. The quotation is real and on the page; the claim
+    // says the opposite of it. A quotation check cannot tell the difference, so
+    // the verdict must not be named as though it had: it reports that the quote
+    // was found, and nothing about whether the claim follows.
+    let findings: Findings = serde_json::from_value(json!({
+        "claims": [{
+            "text": "Rust 1.98.1 has not been released",
+            "kind": "sourced",
+            "source_urls": ["https://blog.rust-lang.org/releases/latest/"],
+            "evidence": "\u{201c}The Rust team has published a new point release of Rust, 1.98.1.\u{201d}"
+        }],
+        "unsupported": []
+    }))
+    .unwrap();
+
+    let report = verify::check(&findings, Duration::from_secs(20));
+
+    // The quotation is genuine, so it is found.
+    assert_eq!(report.quotation_present, 1);
+    // And the vocabulary must not overclaim on the back of that.
+    let wire = serde_json::to_string(&report).unwrap();
+    assert!(
+        wire.contains("quotation_present"),
+        "the verdict must name what it establishes, got {wire}"
+    );
+    assert!(
+        !wire.contains("\"supported\""),
+        "nothing here may report this claim as supported: {wire}"
+    );
+    assert!(
+        report.basis.contains("does not establish"),
+        "the basis must say what the check cannot show"
+    );
+    assert!(
+        report
+            .basis
+            .contains("contradicting its own genuine quotation"),
+        "and should name this case specifically, since a reader will assume otherwise"
+    );
+}
+
+#[test]
+fn the_basis_separates_quotation_presence_from_semantic_support() {
+    let report = verify::check(
+        &Findings {
+            claims: vec![],
+            unsupported: vec![],
+        },
+        Duration::from_secs(1),
+    );
+    for phrase in [
+        "only that the passage is on the page",
+        "does not establish that the page is correct",
+        "qualifications and negations",
+    ] {
+        assert!(
+            report.basis.contains(phrase),
+            "the basis should carry {phrase:?}, got {:?}",
+            report.basis
+        );
+    }
 }

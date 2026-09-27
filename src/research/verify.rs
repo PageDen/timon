@@ -40,7 +40,13 @@ pub struct Findings {
 #[serde(tag = "verdict", rename_all = "snake_case")]
 pub enum Verdict {
     /// The quoted passage is on the page it cites.
-    Supported { url: String, final_url: String },
+    ///
+    /// Named for what it establishes and no more. It does **not** say the claim
+    /// follows from the passage: a real quotation can sit beside a claim that
+    /// contradicts it, or one that drops the qualification or negation the page
+    /// carried. Calling this "supported" invited exactly that reading, so it
+    /// does not.
+    QuotationPresent { url: String, final_url: String },
     /// It is not. Either the citation is wrong or the passage was invented.
     Unsupported { reason: String },
     /// It could not be checked, so nothing is claimed either way.
@@ -50,12 +56,12 @@ pub enum Verdict {
 }
 
 impl Verdict {
-    /// True only for a claim actually shown to be supported.
+    /// True only where the quotation was found on the cited page.
     ///
     /// Unverifiable is deliberately not a pass. A route that cannot be checked
     /// must not be able to launder claims through by being unavailable.
-    pub fn is_supported(&self) -> bool {
-        matches!(self, Verdict::Supported { .. })
+    pub fn is_quotation_present(&self) -> bool {
+        matches!(self, Verdict::QuotationPresent { .. })
     }
 }
 
@@ -70,19 +76,24 @@ pub struct Checked {
 #[derive(Clone, Debug, Serialize)]
 pub struct Report {
     pub checked: Vec<Checked>,
-    pub supported: usize,
+    /// Claims whose quotation was found on the page they cite.
+    pub quotation_present: usize,
     pub unsupported: usize,
     pub unverifiable: usize,
-    /// True when every sourced claim was shown to be supported. A set with
-    /// nothing to check does not pass: it has demonstrated nothing.
-    pub all_sourced_claims_supported: bool,
+    /// True when every sourced claim's quotation was found. Not a statement
+    /// that the claims are true: semantic support is a separate question this
+    /// does not answer. A set with nothing to check does not pass either, since
+    /// it has demonstrated nothing.
+    pub all_sourced_claims_quoted: bool,
     pub basis: &'static str,
 }
 
 /// What a check does and does not establish.
 pub const VERIFY_BASIS: &str = "Each sourced claim was checked by fetching the page it cites and \
-looking for the passage it quotes. That establishes the passage exists on that page, not that the \
-page is correct, nor that the claim follows from it.";
+looking for the passage it quotes. What that establishes is only that the passage is on the page. \
+It does not establish that the page is correct, that the claim follows from the passage, or that \
+the quotation kept the page's qualifications and negations. A claim contradicting its own genuine \
+quotation would pass this check; judging that is a separate question.";
 
 /// Checks every claim in a set of findings.
 pub fn check(findings: &Findings, timeout: Duration) -> Report {
@@ -94,7 +105,10 @@ pub fn check(findings: &Findings, timeout: Duration) -> Report {
             verdict,
         });
     }
-    let supported = checked.iter().filter(|c| c.verdict.is_supported()).count();
+    let quotation_present = checked
+        .iter()
+        .filter(|c| c.verdict.is_quotation_present())
+        .count();
     let unsupported = checked
         .iter()
         .filter(|c| matches!(c.verdict, Verdict::Unsupported { .. }))
@@ -109,10 +123,10 @@ pub fn check(findings: &Findings, timeout: Duration) -> Report {
         .count();
     Report {
         checked,
-        supported,
+        quotation_present,
         unsupported,
         unverifiable,
-        all_sourced_claims_supported: sourced > 0 && supported == sourced,
+        all_sourced_claims_quoted: sourced > 0 && quotation_present == sourced,
         basis: VERIFY_BASIS,
     }
 }
@@ -158,7 +172,7 @@ needed)",
             // of narration around it. Requiring the raw string to appear failed
             // correctly sourced claims on their punctuation.
             if matches_page(&text, &excerpt) {
-                Verdict::Supported {
+                Verdict::QuotationPresent {
                     url: url.clone(),
                     final_url: page.final_url,
                 }
