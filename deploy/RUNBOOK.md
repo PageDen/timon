@@ -150,6 +150,38 @@ timon usage monthly --socket /run/timon-usage/usage.sock
 timon usage monthly --socket /run/timon-usage/usage.sock --from-month 2026-01
 ```
 
+## Desktop and IDE sessions
+
+Desktop and the IDE extensions speak the app-server protocol and do not go
+through anything Timon supervises, so by default their usage is not recorded. To
+record it, have each person start their client through the bridge:
+
+```
+timon bridge --socket /run/timon-usage/usage.sock -- codex app-server
+```
+
+Point the client's "codex executable" setting at a wrapper containing that line,
+per account. **One app-server per account**: a shared daemon serves several people
+from one process, so every session would be attributed to whoever started it. The
+bridge refuses a `daemon`, `proxy` or `--code-mode-host` invocation for that
+reason rather than recording something misleading.
+
+Diagnostics: `--report` prints a JSON summary to stderr on exit, with bytes
+proxied each way, turns observed, events recorded and spooled, and two fields
+worth watching. `malformed_usage_notifications` above zero means the protocol has
+changed shape — the sessions still work, but turns are going unrecorded, so
+report it. `disagreed_with_thread_total` above zero means the per-turn figures no
+longer sum to the server's own thread total, which a thread compaction can cause
+legitimately.
+
+The bridge never alters the protocol. If a client misbehaves while using it, the
+first check is whether it misbehaves without it: `timon bridge` with no `--socket`
+proxies and records nothing, which isolates the bridge from the app-server.
+
+Pinned version tested: `codex-cli 0.153.2`. The pass-through is version-agnostic
+by construction, but the usage notification's shape is not, so re-check
+`malformed_usage_notifications` after a client upgrade.
+
 ## uid reuse
 
 **The uid is the identity.** `SO_PEERCRED` reports a number and nothing else, a

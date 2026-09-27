@@ -108,6 +108,29 @@ and Linux reissues its number — so the recorder scopes deduplication to a
 *generation* of a uid, and `timon usage retire-uid` records the boundary when an
 account goes. See [deploy/RUNBOOK.md](deploy/RUNBOOK.md#uid-reuse).
 
+### Desktop and IDE sessions
+
+Codex Desktop and the IDE extensions bypass Timon: they speak the app-server
+protocol, not `codex exec`. `timon bridge` makes them visible to the recorder
+without standing in the way:
+
+```sh
+timon bridge --socket /run/timon-usage/usage.sock -- codex app-server
+```
+
+The real app-server runs as a child and every byte passes through unaltered in
+both directions — the protocol has 99 client methods and is marked experimental
+upstream, so this reads the stream rather than reimplementing it. Usage comes from
+`thread/tokenUsage/updated`, which reports both the turn's own cost and the
+thread total, so neither has to be assumed; it also reports reasoning tokens,
+which `codex exec --json` omits.
+
+A shared app-server daemon is refused: it would attribute every session to
+whoever started it. Run one per account.
+
+It records; it does not orchestrate or restrict. Someone running `codex` directly
+remains invisible.
+
 ### Retention
 
 Usage detail is kept for 180 days and then rolled up into per-account, per-month

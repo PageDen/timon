@@ -1,5 +1,62 @@
 # Changelog
 
+## Unreleased
+
+### Codex Desktop and IDE sessions are visible to the recorder (amendment A2)
+
+Desktop and the IDE extensions do not run `codex exec`; they speak the app-server
+protocol over stdio, so nothing Timon supervised was involved and their usage was
+invisible. `timon bridge -- codex app-server` closes that.
+
+**It observes rather than reimplements.** The app-server protocol has **99
+client-to-server methods** — filesystem reads and writes, command execution,
+plugins, a marketplace, MCP servers, skills, threads, turns — and upstream marks
+it `[experimental]`. A shim that reimplemented that surface would be a permanent
+chase after someone else's unstable protocol, and every method it got subtly
+wrong would be a way to break somebody's editor. So the real app-server runs as a
+child, bytes pass through unaltered in both directions, and the stream is read on
+the way past for the one notification that carries token counts.
+
+That turns Codex's conformance condition from a 99-method obligation into a
+property that can be tested: what the client sent arrives unchanged, and what the
+server said arrives unchanged. Both directions are checked byte-for-byte against
+the server's own output, including CRLF, a 4 KB line, invalid UTF-8, and a final
+line with no terminating newline. The forwarding write happens *before* the line
+is parsed, so nothing the observer does can affect what the client receives.
+
+`thread/tokenUsage/updated` carries `threadId`, `turnId`, and both a `last`
+breakdown for the turn and a `total` for the thread. Having both is a piece of
+luck: the `codex exec` adapter has to be *told* whether counts are per-turn or
+cumulative because that stream does not say, and here the protocol supplies both,
+so `last` is recorded and `total` is used to check it. Drift between them is
+reported, never corrected — the protocol may compact a thread, and a silent
+disagreement is worth surfacing rather than resolving by guess.
+
+The breakdown is also richer than `codex exec --json`, which omits reasoning
+tokens entirely (openai/codex#19022). A Desktop session therefore reports a
+*more* complete figure than a supervised run does.
+
+- A shared app-server daemon is **refused, not warned about**: it serves several
+  accounts from one process, so every session would carry the daemon's uid, and a
+  report that confidently names the wrong person is worse than no report.
+- A usage notification whose shape has changed is counted as malformed and
+  reported, never fatal. The worst outcome allowed is that a turn goes unrecorded.
+- A turn reporting no figures is recorded as unknown usage, not zero.
+- A replayed notification is not counted twice; the event id is derived from
+  thread and turn, so a resumed session collapses onto the stored row.
+- Recording happens on a separate task, so an unreachable recorder costs the spool
+  a delay and never holds up the protocol.
+- `--report` writes to stderr, because stdout carries the protocol.
+
+Verified against the real thing, not only fixtures: a live `codex app-server`
+session at pinned `codex-cli 0.153.2` recorded 14,590 tokens with its full
+breakdown, including 4,480 cached input tokens, on first contact.
+
+**What it does not do.** It does not orchestrate, verify, or bound a Desktop
+session, and it cannot make one cheaper or safer. Someone who runs `codex`
+directly is still invisible, and so is someone who edits their client config to
+bypass it. This is reported-usage visibility, unchanged.
+
 ## v0.2.1 — 2026-09-27
 
 Everything below ships to the shared hosts. The schema moves to v2, so the

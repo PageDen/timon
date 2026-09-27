@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use timon::admission::{Ledger, RunLimits};
 use timon::attempt::{AttemptSpec, Role, UsageSource, run_attempt};
+use timon::bridge;
 use timon::mcp::tools::WorkerPolicy;
 use timon::recorder::client::{send as recorder_send, send_line as recorder_send_line};
 use timon::recorder::db::{RESTORE_CAVEAT, Store, plan_restore, restore};
@@ -55,6 +56,8 @@ enum Command {
     /// Record reported token usage per account (amendment A1).
     #[command(subcommand)]
     Usage(UsageCommand),
+    /// Make a Codex Desktop or IDE session visible to the usage recorder
+    Bridge(BridgeArgs),
     /// Operator commands for the host-wide worker slots.
     #[command(subcommand)]
     Slots(SlotsCommand),
@@ -243,6 +246,27 @@ enum UsageCommand {
     /// Record that an account was removed, so the next holder of its uid starts
     /// a new generation instead of inheriting its history.
     RetireUid(RetireUidArgs),
+}
+
+#[derive(Args)]
+struct BridgeArgs {
+    /// The recorder socket. Omit to proxy without recording, which is how the
+    /// pass-through is checked without a daemon running.
+    #[arg(long)]
+    socket: Option<PathBuf>,
+    /// This account's spool. Defaults to the one an attempt would use, so a
+    /// recorder outage costs a delay rather than the record.
+    #[arg(long)]
+    spool: Option<PathBuf>,
+    /// Model to attribute. The protocol's usage notification does not name one.
+    #[arg(long)]
+    model: Option<String>,
+    /// Report what was proxied and recorded, as JSON, when the child exits.
+    #[arg(long)]
+    report: bool,
+    /// The app-server to run, followed by its arguments.
+    #[arg(last = true, required = true)]
+    command: Vec<std::ffi::OsString>,
 }
 
 #[derive(Args)]
@@ -561,6 +585,7 @@ fn run() -> Result<u8> {
         Command::Slots(SlotsCommand::Provision(args)) => return slots_provision(args),
         Command::Research(ResearchCommand::Verify(args)) => return research_verify(args),
         Command::Mcp(args) => return mcp_serve(args),
+        Command::Bridge(args) => return bridge_appserver(args),
         Command::Orchestrate(args) => return orchestrate_run(args),
     };
     attempt_run(role, args)
@@ -801,6 +826,49 @@ fn usage_command(command: UsageCommand) -> Result<u8> {
         UsageCommand::Retain(args) => usage_retain(args),
         UsageCommand::RetireUid(args) => usage_retire_uid(args),
     }
+}
+
+fn bridge_appserver(args: BridgeArgs) -> Result<u8> {
+    if bridge::appserver::looks_like_shared_daemon(&args.command) {
+        // Refused rather than warned. A shared daemon serves several accounts
+        // from one process, so every session would be attributed to whoever
+        // started it, and a report that confidently names the wrong person is
+        // worse than no report at all.
+        bail!(
+            "that command runs or attaches to a shared app-server daemon, so the recorder \
+             would see the daemon's identity rather than each person's. Run an app-server \
+             per account instead: `timon bridge -- codex app-server`"
+        );
+    }
+
+    let spool = match args.socket.as_ref() {
+        None => None,
+        Some(_) => {
+            let dir = args
+                .spool
+                .clone()
+                .or_else(Spool::resolve)
+                .context("no spool directory: pass --spool or set TIMON_SPOOL_DIR")?;
+            Some(Spool::open(dir, DEFAULT_MAX_SPOOLED_EVENTS).context("opening the spool")?)
+        }
+    };
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("starting the runtime")?;
+    let report = runtime.block_on(bridge::appserver::run(bridge::appserver::Config {
+        command: args.command,
+        socket: args.socket,
+        spool,
+        model: args.model,
+    }))?;
+
+    if args.report {
+        // To stderr: stdout carries the protocol and must stay byte-identical.
+        eprintln!("{}", serde_json::to_string_pretty(&report)?);
+    }
+    Ok(report.exit_code.unwrap_or(0).clamp(0, 255) as u8)
 }
 
 async fn usage_monthly(args: MonthlyArgs) -> Result<u8> {
