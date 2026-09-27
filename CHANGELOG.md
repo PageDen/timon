@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## v0.2.3 — 2026-09-27
+
+A fix only. No schema change and no new capability: a database at v2 is untouched
+and the only effect of the update is a restart.
 
 ### Fixed: the bridge hung after a short-lived child exited
 
