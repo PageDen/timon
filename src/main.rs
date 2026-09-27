@@ -6,6 +6,7 @@ use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use timon::admission::{Ledger, RunLimits};
 use timon::attempt::{AttemptSpec, Role, UsageSource, run_attempt};
 use timon::recorder::client::{send as recorder_send, send_line as recorder_send_line};
 use timon::recorder::db::{RESTORE_CAVEAT, Store, plan_restore, restore};
@@ -22,6 +23,11 @@ use timon::worker::{WorkerLimits, WorkerSpec};
 
 /// Exit code when no worker slot is free (EX_TEMPFAIL).
 const EXIT_NO_SLOT: u8 = 75;
+/// The run's own allowance is used up (EX_UNAVAILABLE).
+///
+/// Distinct from `EXIT_NO_SLOT`: a busy host frees up, a spent run does not, so
+/// a caller should not retry this one.
+const EXIT_RUN_ALLOWANCE: u8 = 69;
 const EXIT_ATTEMPT_FAILED: u8 = 1;
 /// The process succeeded but its typed result is missing or invalid (EX_DATAERR).
 const EXIT_RESULT_UNUSABLE: u8 = 65;
@@ -282,6 +288,21 @@ struct RunArgs {
     /// Spooled events to try to deliver after this attempt.
     #[arg(long, default_value_t = 32)]
     usage_replay_batch: usize,
+    /// Directory holding this run's shared admission ledger. Without it the run
+    /// has no allowance and nothing is admitted or recorded.
+    #[arg(long, requires = "run_id")]
+    run_ledger: Option<PathBuf>,
+    /// Attempts this run may start. Enforced: the ledger is where they start.
+    #[arg(long, default_value_t = 64)]
+    run_max_attempts: u32,
+    /// Token admission ceiling for the run. An estimate that decides whether to
+    /// start another attempt, not a cap on what a running attempt spends.
+    #[arg(long)]
+    run_token_ceiling: Option<u64>,
+    /// Tokens held for this attempt until its real usage is known. Set it from
+    /// observed per-attempt usage on your own routes; it is never zero.
+    #[arg(long, default_value_t = timon::admission::DEFAULT_ATTEMPT_RESERVE)]
+    attempt_reserve: u64,
     /// Program to run, followed by its arguments.
     #[arg(last = true, required = true, num_args = 1..)]
     command: Vec<OsString>,
@@ -531,6 +552,39 @@ fn attempt_run(role: Role, args: RunArgs) -> Result<u8> {
     let usage_source = parse_usage_source(&args.usage_source);
     let task = read_task(args.max_task_bytes)?;
 
+    // Reserved before the attempt starts, and only from the ledger, so two
+    // processes cannot both take the last of a run's allowance.
+    let ledger = match (&args.run_ledger, &args.run_id) {
+        (Some(dir), Some(run_id)) => {
+            Some(Ledger::open(dir, run_id).with_context(|| format!("opening {}", dir.display()))?)
+        }
+        _ => None,
+    };
+    let attempt_id = args.attempt_id.clone();
+    let admission_limits = RunLimits {
+        max_attempts: args.run_max_attempts,
+        token_ceiling: args.run_token_ceiling,
+        attempt_reserve: args.attempt_reserve,
+    };
+    if let Some(ledger) = &ledger {
+        match ledger
+            .admit(&attempt_id, &admission_limits)
+            .context("reading the run's admission ledger")?
+        {
+            Ok(admitted) => {
+                eprintln!(
+                    "timon: admitted, holding {} tokens for this attempt. {}",
+                    admitted.reserved, admitted.basis
+                );
+            }
+            Err(refusal) => {
+                eprintln!("timon: not admitted: {refusal}");
+                println!("{}", serde_json::to_string_pretty(&refusal)?);
+                return Ok(EXIT_RUN_ALLOWANCE);
+            }
+        }
+    }
+
     let _lease = match (&args.slot_dir, args.slots) {
         (Some(dir), Some(limit)) => {
             let mode = if args.provisioned_slots {
@@ -578,6 +632,21 @@ fn attempt_run(role: Role, args: RunArgs) -> Result<u8> {
 
     let runtime = tokio::runtime::Runtime::new().context("failed to start async runtime")?;
     let report = runtime.block_on(run_attempt(&spec, shutdown_signal()))?;
+
+    // Settled with whatever the attempt reported, including nothing. An unknown
+    // total keeps its reservation rather than releasing tokens that may well
+    // have been spent.
+    if let Some(ledger) = &ledger {
+        match ledger.settle(&attempt_id, report.usage.total.value()) {
+            Ok(settled) if !settled.usage_known => eprintln!(
+                "timon: this attempt reported no usage, so its {} reserved token(s) stay held \
+against the run: unknown is not zero",
+                admission_limits.attempt_reserve
+            ),
+            Ok(_) => {}
+            Err(error) => eprintln!("timon: the admission ledger could not be settled: {error}"),
+        }
+    }
 
     // Reporting runs after the work and can only degrade tracking, never the
     // attempt: a recorder that is down must not fail a run the user asked for.
