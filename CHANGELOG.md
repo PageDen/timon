@@ -102,10 +102,20 @@ So it ships opt-in and experimental, with **no** cost or speed claim.
 - The append-only triggers are application integrity guards, not protection
   against root or the file's owner.
 - No hard token cap exists. Admission is an estimate and overshoot is possible.
-- A lease whose process is `SIGKILL`ed never runs its destructor, so slot release
-  falls back to descriptor close.
-- Process-group id reuse in a narrow window remains theoretically possible
-  (round-0 finding C4), unconfirmed.
+- **Accepted, not fixed:** a lease whose process is `SIGKILL`ed never runs its
+  destructor, so slot release falls back to the descriptor closing at exit. Where
+  a concurrently forked child shares that open file description, the slot stays
+  locked until the child exits and appears busy while free. This fails in the
+  safe direction — the host limit is never exceeded, work is refused with exit 75
+  while capacity exists — and a fix would need release that does not depend on
+  the holder running code, where breaking a lock held by a process that may still
+  be alive risks over-admission instead.
+- **Accepted, not fixed:** after a worker exits normally its process group is
+  killed to remove leftover descendants, and by then the group leader has been
+  reaped so its pid is free for reuse. Reissued as a new group leader inside that
+  window, an unrelated group would be killed (round-0 finding C4). The window is
+  microseconds, pids are allocated sequentially to a large maximum, and this has
+  never been observed. Worth revisiting on a host with very high pid churn.
 - A uid must not be recycled while records for it are retained; the code does not
   enforce this.
 - Semantic claim support is unimplemented; see citation checking above.
