@@ -12,6 +12,10 @@ use timon::broker::serve::{model_unavailable, status_of};
 
 const NOW: i64 = 1_790_000_000;
 
+/// Two different Linux logins on the shared host.
+const ALICE: u32 = 1000;
+const BOB: u32 = 1001;
+
 fn standing(account: &str, used_percent: u32) -> Standing {
     Standing {
         account_id: account.to_string(),
@@ -79,12 +83,12 @@ fn a_thread_stays_on_the_account_that_started_it_even_when_another_has_more_room
         ("acct2", standing("acct2", 90)),
         ("acct3", standing("acct3", 1)),
     ]);
-    pool.bind("thread-a", "acct2", NOW);
+    pool.bind(ALICE, "thread-a", "acct2", NOW);
     let chosen = pool
         .choose(
             &names(&["acct2", "acct3"]),
             None,
-            Some("thread-a"),
+            Some((ALICE, "thread-a")),
             &[],
             NOW,
         )
@@ -101,19 +105,19 @@ fn an_affinity_lapses_so_the_map_cannot_grow_without_bound() {
         ("acct2", standing("acct2", 90)),
         ("acct3", standing("acct3", 1)),
     ]);
-    pool.bind("thread-a", "acct2", NOW);
+    pool.bind(ALICE, "thread-a", "acct2", NOW);
     let later = NOW + 13 * 3600;
     let chosen = pool
         .choose(
             &names(&["acct2", "acct3"]),
             None,
-            Some("thread-a"),
+            Some((ALICE, "thread-a")),
             &[],
             later,
         )
         .unwrap();
     assert_eq!(chosen, "acct3");
-    assert!(pool.bound("thread-a", later).is_none());
+    assert!(pool.bound(ALICE, "thread-a", later).is_none());
 }
 
 #[test]
@@ -122,12 +126,12 @@ fn a_thread_bound_to_an_exhausted_account_moves_rather_than_failing() {
         ("acct2", exhausted("acct2")),
         ("acct3", standing("acct3", 50)),
     ]);
-    pool.bind("thread-a", "acct2", NOW);
+    pool.bind(ALICE, "thread-a", "acct2", NOW);
     let chosen = pool
         .choose(
             &names(&["acct2", "acct3"]),
             None,
-            Some("thread-a"),
+            Some((ALICE, "thread-a")),
             &[],
             NOW,
         )
@@ -387,4 +391,58 @@ fn a_reading_goes_stale_so_usage_spent_elsewhere_is_noticed() {
     let standing = standing("acct2", 4);
     assert!(!standing.stale(NOW + 30));
     assert!(standing.stale(NOW + 61));
+}
+
+#[test]
+fn two_callers_sending_the_same_thread_id_do_not_share_a_binding() {
+    // Raised by Codex's review of the plan, and it was right. The thread id
+    // arrives in a header, so it is whatever the caller types. Keyed on the
+    // thread alone, Bob would inherit Alice's account — and could park his own
+    // conversation on an account by naming a thread that is not his.
+    let mut pool = pool_of(&[
+        ("acct2", standing("acct2", 90)),
+        ("acct3", standing("acct3", 1)),
+    ]);
+    pool.bind(ALICE, "shared-thread-id", "acct2", NOW);
+
+    let alice = pool
+        .choose(
+            &names(&["acct2", "acct3"]),
+            None,
+            Some((ALICE, "shared-thread-id")),
+            &[],
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(alice, "acct2", "Alice keeps her own binding");
+
+    let bob = pool
+        .choose(
+            &names(&["acct2", "acct3"]),
+            None,
+            Some((BOB, "shared-thread-id")),
+            &[],
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(
+        bob, "acct3",
+        "Bob is chosen on headroom, not handed Alice's account"
+    );
+    assert!(pool.bound(BOB, "shared-thread-id", NOW).is_none());
+    assert_eq!(pool.bound(ALICE, "shared-thread-id", NOW), Some("acct2"));
+}
+
+#[test]
+fn one_caller_keeps_its_own_threads_apart() {
+    let mut pool = pool_of(&[
+        ("acct2", standing("acct2", 50)),
+        ("acct3", standing("acct3", 50)),
+    ]);
+    pool.bind(ALICE, "thread-one", "acct3", NOW);
+    assert_eq!(pool.bound(ALICE, "thread-one", NOW), Some("acct3"));
+    assert!(
+        pool.bound(ALICE, "thread-two", NOW).is_none(),
+        "a second conversation is not captured by the first"
+    );
 }

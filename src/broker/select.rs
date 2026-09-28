@@ -9,6 +9,13 @@
 //! Affinity is keyed on the `thread-id` header, which Codex sends on every turn
 //! and which was confirmed present against a live client.
 //!
+//! The thread id alone is not the key. It arrives in a header, so it is whatever
+//! the caller says it is; two callers sending the same value would otherwise
+//! share one binding, and one of them could park a conversation on an account by
+//! naming a thread belonging to somebody else. The key is the caller's uid, taken
+//! from the kernel, together with the thread. A caller can only ever collide with
+//! itself.
+//!
 //! *Capability.* Accounts are not interchangeable. Testing found an account whose
 //! catalog advertised a model the account could not actually be served, so a
 //! refusal for a model is remembered against that account and that model, and
@@ -73,8 +80,11 @@ pub struct Pool {
     standings: HashMap<String, Standing>,
     /// `(account, model)` to the time the exclusion lapses.
     refusals: HashMap<(String, String), i64>,
-    /// `thread-id` to the account serving it, and when it was last seen.
-    affinity: HashMap<String, (String, i64)>,
+    /// `(uid, thread-id)` to the account serving it, and when it was last seen.
+    ///
+    /// The uid is in the key because the thread is not trustworthy on its own:
+    /// it is a header value, and headers come from the caller.
+    affinity: HashMap<(u32, String), (String, i64)>,
 }
 
 impl Pool {
@@ -105,16 +115,16 @@ impl Pool {
             .is_some_and(|until| *until > now)
     }
 
-    /// Binds a thread to the account that served it.
-    pub fn bind(&mut self, thread: &str, account: &str, now: i64) {
+    /// Binds one caller's thread to the account that served it.
+    pub fn bind(&mut self, uid: u32, thread: &str, account: &str, now: i64) {
         self.affinity
-            .insert(thread.to_string(), (account.to_string(), now));
+            .insert((uid, thread.to_string()), (account.to_string(), now));
     }
 
-    /// The account a thread is bound to, if the binding is still live.
-    pub fn bound(&self, thread: &str, now: i64) -> Option<&str> {
+    /// The account this caller's thread is bound to, if the binding is still live.
+    pub fn bound(&self, uid: u32, thread: &str, now: i64) -> Option<&str> {
         self.affinity
-            .get(thread)
+            .get(&(uid, thread.to_string()))
             .filter(|(_, seen)| now - *seen <= AFFINITY_SECS)
             .map(|(account, _)| account.as_str())
     }
@@ -142,7 +152,7 @@ impl Pool {
         &mut self,
         candidates: &[String],
         model: Option<&str>,
-        thread: Option<&str>,
+        caller: Option<(u32, &str)>,
         exclude: &[String],
         now: i64,
     ) -> Result<String, NoAccount> {
@@ -166,10 +176,10 @@ impl Pool {
                 .unwrap_or(true)
         };
 
-        // Continuity first: an account that is already carrying this thread wins
-        // even when another has more headroom.
-        if let Some(thread) = thread
-            && let Some(bound) = self.bound(thread, now).map(str::to_string)
+        // Continuity first: an account that is already carrying this caller's
+        // thread wins even when another has more headroom.
+        if let Some((uid, thread)) = caller
+            && let Some(bound) = self.bound(uid, thread, now).map(str::to_string)
             && candidates.contains(&bound)
             && eligible(&bound)
         {
