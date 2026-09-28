@@ -201,6 +201,10 @@ pub struct Executed {
 pub struct Plan {
     /// Where the broker listens.
     pub broker: String,
+    /// Set to stop the run. Watched by the worker, not only by the caller:
+    /// stopping the caller while a child keeps talking to a provider is not
+    /// cancelling, it is losing track.
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The command for a cheap worker, and for a strong one. Fixed by the
     /// operator: a model that could choose its own command is not bounded by
     /// anything the command enforces.
@@ -325,12 +329,22 @@ async fn run_worker(
     };
     spec.validate().map_err(|error| format!("{error}"))?;
 
-    // Nothing cancels this yet, so the cancel future never resolves and the
-    // deadline is what bounds the worker. `timon runs cancel` reaching a running
-    // worker is the next piece, and pretending otherwise here would hide it.
-    let outcome = spawn(&spec, std::future::pending::<()>())
-        .await
-        .map_err(|error| format!("{error}"))?;
+    // Cancellation reaches the worker's process group, not just this function.
+    // The flag is polled rather than awaited on a channel because the thing
+    // setting it is a signal handler or another thread, and a poll is the
+    // smallest mechanism that works from both.
+    let cancel = std::sync::Arc::clone(&plan.cancel);
+    let outcome = spawn(&spec, async move {
+        while !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .map_err(|error| format!("{error}"))?;
+
+    if outcome.cancelled {
+        return Err("the run was cancelled".to_string());
+    }
     if !outcome.succeeded() {
         return Err(describe(&outcome));
     }

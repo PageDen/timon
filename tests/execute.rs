@@ -23,6 +23,7 @@ fn plan(broker: &str, dir: &std::path::Path) -> Plan {
         deadline: std::time::Duration::from_secs(20),
         max_output_bytes: 1024 * 1024,
         grant_lifetime_secs: 120,
+        cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
 }
 
