@@ -12,5 +12,6 @@ pub mod orchestrate;
 pub mod recorder;
 pub mod research;
 pub mod result;
+pub mod run;
 pub mod usage;
 pub mod worker;

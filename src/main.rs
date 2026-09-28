@@ -72,6 +72,100 @@ enum Command {
     Mcp(McpArgs),
     /// Run a goal through plan, delegate and integrate.
     Orchestrate(OrchestrateArgs),
+    /// Hand a goal to Timon: preflight first, then a run that outlives the terminal.
+    Run(HandoffArgs),
+    /// Inspect and cancel hand-offs.
+    #[command(subcommand)]
+    Runs(RunsCommand),
+}
+
+/// Where the run store lives by default.
+///
+/// Under the caller's own home, because a run belongs to the person who started
+/// it and a shared file would make one developer's hand-offs visible to another.
+fn default_run_store() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home).join(".timon").join("runs.sqlite")
+}
+
+#[derive(Args)]
+struct HandoffArgs {
+    /// What the run should achieve.
+    goal: String,
+    /// The repository the work is rooted in. Defaults to the current directory.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+    /// Pooled accounts this run may spend. Repeatable. Omit to let the broker choose.
+    #[arg(long = "account")]
+    accounts: Vec<String>,
+    /// Attempts this run may start.
+    #[arg(long, default_value_t = 64)]
+    max_attempts: u32,
+    /// Token admission ceiling. An estimate that decides whether to start more
+    /// work, never a cap on what running work spends.
+    #[arg(long)]
+    token_ceiling: Option<u64>,
+    /// Seconds from now after which no further work is started.
+    #[arg(long)]
+    deadline_secs: Option<i64>,
+    /// Makes resubmission idempotent: the same key returns the same run.
+    #[arg(long)]
+    submission_key: Option<String>,
+    /// The run store.
+    #[arg(long)]
+    store: Option<PathBuf>,
+    /// Record the run and report it, without starting the pipeline. The pipeline
+    /// itself is P2 onwards; this is what P1 delivers.
+    #[arg(long, default_value_t = true)]
+    preflight_only: bool,
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    format: ReportFormat,
+}
+
+#[derive(Subcommand)]
+enum RunsCommand {
+    /// Show recent hand-offs and their state
+    List(RunsListArgs),
+    /// Show one hand-off
+    Show(RunsShowArgs),
+    /// Ask a hand-off to stop
+    Cancel(RunsCancelArgs),
+    /// Mark runs left behind by a stopped orchestrator, and report them
+    Recover(RunsRecoverArgs),
+}
+
+#[derive(Args)]
+struct RunsListArgs {
+    #[arg(long)]
+    store: Option<PathBuf>,
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    format: ReportFormat,
+}
+
+#[derive(Args)]
+struct RunsShowArgs {
+    id: String,
+    #[arg(long)]
+    store: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    format: ReportFormat,
+}
+
+#[derive(Args)]
+struct RunsCancelArgs {
+    id: String,
+    #[arg(long)]
+    store: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct RunsRecoverArgs {
+    #[arg(long)]
+    store: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    format: ReportFormat,
 }
 
 #[derive(Args)]
@@ -651,6 +745,11 @@ fn run() -> Result<u8> {
         Command::Broker(BrokerCommand::Serve(args)) => return broker_serve(args),
         Command::Broker(BrokerCommand::Refresh(args)) => return broker_refresh(args),
         Command::Orchestrate(args) => return orchestrate_run(args),
+        Command::Run(args) => return run_start(args),
+        Command::Runs(RunsCommand::List(args)) => return runs_list(args),
+        Command::Runs(RunsCommand::Show(args)) => return runs_show(args),
+        Command::Runs(RunsCommand::Cancel(args)) => return runs_cancel(args),
+        Command::Runs(RunsCommand::Recover(args)) => return runs_recover(args),
     };
     attempt_run(role, args)
 }
@@ -918,6 +1017,273 @@ fn broker_accounts(args: BrokerAccountsArgs) -> Result<u8> {
     } else {
         1
     })
+}
+
+/// Detects what the work will start from.
+///
+/// Stated rather than assumed. A repository with uncommitted changes is the
+/// normal case, and a report that cannot say whether that work was included is
+/// one nobody can reproduce from.
+fn detect_base(workspace: Option<&std::path::Path>) -> timon::run::record::Base {
+    use timon::run::record::Base;
+    let Some(dir) = workspace else {
+        return Base::None;
+    };
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let Some(commit) = git(&["rev-parse", "HEAD"]).filter(|c| !c.is_empty()) else {
+        return Base::None;
+    };
+    let dirty = git(&["status", "--porcelain"])
+        .map(|status| !status.is_empty())
+        .unwrap_or(false);
+    if !dirty {
+        return Base::Head { commit };
+    }
+    // Uncommitted work exists, so it is captured rather than silently included
+    // or silently dropped. `stash create` writes a commit without touching the
+    // working tree, which is what makes this safe to do to somebody's checkout.
+    match git(&["stash", "create"]).filter(|s| !s.is_empty()) {
+        Some(snapshot) => Base::Snapshot { commit, snapshot },
+        // The snapshot failed; say the tree was dirty rather than claim it was
+        // clean, because the difference is what a reader needs.
+        None => Base::Snapshot {
+            commit,
+            snapshot: "unavailable".to_string(),
+        },
+    }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+fn open_runs(store: Option<PathBuf>) -> Result<timon::run::record::Runs> {
+    let path = store.unwrap_or_else(default_run_store);
+    timon::run::record::Runs::open(&path)
+        .map_err(|error| anyhow::anyhow!("opening the run store {}: {error}", path.display()))
+}
+
+/// Renders one run for a person.
+fn render_run(run: &timon::run::record::Run) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("{}  {}\n", run.id, run.status.as_str()));
+    out.push_str(&format!("  goal        {}\n", run.goal));
+    out.push_str(&format!("  principal   uid {}\n", run.principal_uid));
+    if let Some(workspace) = &run.workspace {
+        out.push_str(&format!("  workspace   {}\n", workspace.display()));
+    }
+    out.push_str(&format!("  base        {}\n", run.base.describe()));
+    let accounts = if run.accounts.is_empty() {
+        "any the broker chooses".to_string()
+    } else {
+        run.accounts.join(", ")
+    };
+    out.push_str(&format!("  accounts    {accounts}\n"));
+    out.push_str(&format!("  attempts    up to {}\n", run.max_attempts));
+    match run.token_ceiling {
+        Some(ceiling) => out.push_str(&format!(
+            "  ceiling     {ceiling} tokens (admission only, not a cap)\n"
+        )),
+        None => out.push_str("  ceiling     none set\n"),
+    }
+    if let Some(deadline) = run.deadline {
+        out.push_str(&format!(
+            "  deadline    {}\n",
+            timon::recorder::render::utc(deadline)
+        ));
+    }
+    out.push_str(&format!(
+        "  started     {}\n",
+        timon::recorder::render::utc(run.started_at)
+    ));
+    if let Some(ended) = run.ended_at {
+        out.push_str(&format!(
+            "  ended       {}\n",
+            timon::recorder::render::utc(ended)
+        ));
+    }
+    if let Some(detail) = &run.detail {
+        out.push_str(&format!("  note        {detail}\n"));
+    }
+    out
+}
+
+fn run_start(args: HandoffArgs) -> Result<u8> {
+    use timon::run::start::{Request, admit};
+
+    let runs = open_runs(args.store)?;
+    let workspace = match args.workspace {
+        Some(path) => Some(path),
+        None => std::env::current_dir().ok(),
+    };
+    let base = detect_base(workspace.as_deref());
+    let now = now_secs();
+
+    let request = Request {
+        goal: args.goal,
+        // From the kernel, not from a flag: attribution a caller can set is not
+        // attribution.
+        principal_uid: nix_uid(),
+        workspace,
+        accounts: args.accounts,
+        max_attempts: args.max_attempts,
+        token_ceiling: args.token_ceiling,
+        deadline: args.deadline_secs.map(|secs| now + secs),
+        submission_key: args.submission_key,
+    };
+
+    let run = match admit(
+        &runs,
+        request,
+        base,
+        now,
+        None,
+        timon::admission::DEFAULT_ATTEMPT_RESERVE,
+    ) {
+        Ok(run) => run,
+        Err(refused) => {
+            eprintln!("timon run: not started. {refused}");
+            return Ok(1);
+        }
+    };
+
+    match args.format {
+        ReportFormat::Csv => {
+            eprintln!("csv is for usage exports; a run record is reported as text or json");
+            return Ok(2);
+        }
+        ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&run)?),
+        ReportFormat::Text => {
+            print!("{}", render_run(&run));
+            println!(
+                "\nRecorded. This run outlives the terminal: `timon runs show {}` \n\
+                 reports it later, and `timon runs cancel {}` stops it.",
+                run.id, run.id
+            );
+            if args.preflight_only {
+                println!(
+                    "\nPreflight only. Triage and the pipeline are P2 onwards; nothing \n\
+                     has been sent to a model and no quota has been spent."
+                );
+            }
+        }
+    }
+    Ok(0)
+}
+
+/// This process's real uid.
+fn nix_uid() -> u32 {
+    // SAFETY: `getuid` cannot fail and touches no memory the caller owns.
+    unsafe { libc::getuid() }
+}
+
+fn runs_list(args: RunsListArgs) -> Result<u8> {
+    let runs = open_runs(args.store)?;
+    let recent = runs
+        .recent(args.limit)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    match args.format {
+        ReportFormat::Csv => {
+            eprintln!("csv is for usage exports; run records are reported as text or json");
+            return Ok(2);
+        }
+        ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&recent)?),
+        ReportFormat::Text => {
+            if recent.is_empty() {
+                println!("No runs yet. `timon run \"<goal>\"` starts one.");
+                return Ok(0);
+            }
+            for run in &recent {
+                println!(
+                    "{:<28} {:<12} {}",
+                    run.id,
+                    run.status.as_str(),
+                    run.goal.lines().next().unwrap_or("")
+                );
+            }
+        }
+    }
+    Ok(0)
+}
+
+fn runs_show(args: RunsShowArgs) -> Result<u8> {
+    let runs = open_runs(args.store)?;
+    let run = match runs.get(&args.id) {
+        Ok(run) => run,
+        Err(error) => {
+            eprintln!("{error}");
+            return Ok(1);
+        }
+    };
+    match args.format {
+        ReportFormat::Csv => {
+            eprintln!("csv is for usage exports; a run record is reported as text or json");
+            return Ok(2);
+        }
+        ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&run)?),
+        ReportFormat::Text => print!("{}", render_run(&run)),
+    }
+    Ok(0)
+}
+
+fn runs_cancel(args: RunsCancelArgs) -> Result<u8> {
+    let runs = open_runs(args.store)?;
+    match runs.cancel(&args.id, nix_uid(), now_secs()) {
+        Ok(run) => {
+            println!("{}: {}", run.id, run.status.as_str());
+            Ok(0)
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            Ok(1)
+        }
+    }
+}
+
+fn runs_recover(args: RunsRecoverArgs) -> Result<u8> {
+    let runs = open_runs(args.store)?;
+    let stranded = runs
+        .interrupt_stale(now_secs())
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    match args.format {
+        ReportFormat::Csv => {
+            eprintln!("csv is for usage exports; run records are reported as text or json");
+            return Ok(2);
+        }
+        ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&stranded)?),
+        ReportFormat::Text => {
+            if stranded.is_empty() {
+                println!("No runs were left behind.");
+            } else {
+                println!(
+                    "{} run(s) were still marked running and cannot be; marked interrupted:",
+                    stranded.len()
+                );
+                for run in &stranded {
+                    println!("  {}  {}", run.id, run.goal.lines().next().unwrap_or(""));
+                }
+                println!(
+                    "\nTheir work stopped when the orchestrator did. Nothing was resumed, \n\
+                     and nothing was silently retried."
+                );
+            }
+        }
+    }
+    Ok(0)
 }
 
 /// Renews pooled access tokens on demand.
