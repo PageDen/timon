@@ -981,8 +981,49 @@ cannot be identified is refused, never attributed to a default."
 to whichever account has the most of its window left."
         );
     }
+    // Check in with the supervisor, if there is one. `ready()` is what releases
+    // `Type=notify`, so ordering only completes once the port is actually open.
+    broker::notify::ready();
+    start_watchdog(Arc::clone(&config), Arc::clone(&counters));
+
     broker::serve::serve(config, counters, listener, Arc::new(|| false))?;
     Ok(0)
+}
+
+/// Checks in with systemd for as long as the broker can actually serve.
+///
+/// Deliberately a dead-man's switch rather than a report. The failure worth
+/// catching here is a poisoned pool lock, which leaves the process running and
+/// the port open while every request fails; a supervisor watching for a crash
+/// would never act on it. Stopping the check-in is what causes the restart.
+///
+/// Does nothing when not running under systemd.
+fn start_watchdog(
+    config: std::sync::Arc<broker::serve::Config>,
+    counters: std::sync::Arc<broker::serve::Counters>,
+) {
+    let Some(interval) = broker::notify::interval() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(interval);
+            let health = broker::health::check(&config, &counters);
+            if health.healthy {
+                broker::notify::status(&format!(
+                    "serving {} of {} account(s); {} request(s) forwarded",
+                    health.accounts_usable, health.accounts_configured, health.requests_forwarded
+                ));
+                broker::notify::watchdog();
+            } else {
+                // Said once into the journal, so the restart has a reason
+                // attached rather than appearing as an unexplained kill.
+                let reason = health.faults.join("; ");
+                eprintln!("timon broker: not healthy, withholding watchdog: {reason}");
+                broker::notify::degraded(&reason);
+            }
+        }
+    });
 }
 
 fn bridge_appserver(args: BridgeArgs) -> Result<u8> {
