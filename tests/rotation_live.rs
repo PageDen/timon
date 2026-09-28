@@ -186,6 +186,7 @@ fn an_account_that_cannot_serve_the_model_is_rotated_past_before_anything_is_str
         serving: vec!["acct3".to_string(), "acct2".to_string()],
         pool: std::sync::Mutex::new(pool),
         models: timon::broker::policy::ModelPolicy::default(),
+        grants: std::sync::Mutex::new(timon::broker::grant::Grants::new()),
         read_timeout: std::time::Duration::from_secs(20),
     });
     let counters = Arc::new(Counters::default());
@@ -254,6 +255,7 @@ fn a_request_no_account_can_serve_is_refused_in_terms_the_caller_can_act_on() {
         serving: vec!["acct3".to_string()],
         pool: std::sync::Mutex::new(Pool::new()),
         models: timon::broker::policy::ModelPolicy::default(),
+        grants: std::sync::Mutex::new(timon::broker::grant::Grants::new()),
         read_timeout: std::time::Duration::from_secs(20),
     });
     let counters = Arc::new(Counters::default());
@@ -377,6 +379,7 @@ fn a_credential_the_provider_refuses_takes_its_account_out_of_the_pool() {
         serving: vec!["acct3".to_string(), "acct2".to_string()],
         pool: std::sync::Mutex::new(pool),
         models: timon::broker::policy::ModelPolicy::default(),
+        grants: std::sync::Mutex::new(timon::broker::grant::Grants::new()),
         read_timeout: std::time::Duration::from_secs(20),
     });
     let counters = Arc::new(Counters::default());

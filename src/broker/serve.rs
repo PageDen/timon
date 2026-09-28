@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use crate::broker::grant::{GRANT_HEADER, Grants};
 use crate::broker::health;
 use crate::broker::identity::peer_uid;
 use crate::broker::policy::{self, Decision, ModelPolicy};
@@ -64,11 +65,15 @@ const RELAY_CHUNK: usize = 8 * 1024;
 ///
 /// Stripped from whatever arrives rather than merged: a caller that sent its own
 /// `authorization` would otherwise choose which account paid for its request.
-const STRIPPED: [&str; 4] = [
+const STRIPPED: [&str; 5] = [
     "authorization",
     "chatgpt-account-id",
     "openai-organization",
     "openai-project",
+    // A grant is between the caller and this broker. The provider has no use
+    // for it, and forwarding it would put a live credential-shaped secret into
+    // somebody else's logs.
+    GRANT_HEADER,
 ];
 
 /// Running totals, reported when the listener stops.
@@ -88,6 +93,9 @@ pub struct Counters {
     /// Requests whose model was replaced by policy. Announced on the response as
     /// well as counted, because a substitution nobody can see is the failure.
     pub model_substitutions: AtomicU64,
+    pub grants_issued: AtomicU64,
+    /// Requests that presented a grant the broker would not honour.
+    pub grants_refused: AtomicU64,
     pub quota_reads: AtomicU64,
     pub bytes_to_upstream: AtomicU64,
     pub bytes_to_client: AtomicU64,
@@ -357,6 +365,10 @@ pub struct Config {
     /// Which model a request gets. Empty by default: without configuration the
     /// broker does not interfere with what a client asked for.
     pub models: ModelPolicy,
+    /// Run authority the broker has issued. Separate from the pool because it
+    /// answers a different question: not which account, but whether this
+    /// request may spend one at all.
+    pub grants: Mutex<Grants>,
     /// How long a client may hold a connection without completing a request.
     pub read_timeout: Duration,
 }
@@ -438,6 +450,15 @@ fn handle(config: &Config, counters: &Counters, stream: TcpStream) -> std::io::R
         }
     };
 
+    // The broker's own endpoints, answered here rather than forwarded. Each is
+    // still identified by uid first, like every other request.
+    if is_grant_request(&request.target) {
+        let response = handle_grant(config, counters, &request, uid);
+        writer.write_all(&response)?;
+        writer.flush()?;
+        return Ok(());
+    }
+
     // Answered here rather than forwarded. A health check must not reach the
     // provider: one that spent quota is one nobody could afford to run often.
     if health::is_health_request(&request.target) {
@@ -446,6 +467,29 @@ fn handle(config: &Config, counters: &Counters, stream: TcpStream) -> std::io::R
         writer.flush()?;
         return Ok(());
     }
+
+    // Authority before anything else: a request carrying a grant the broker will
+    // not honour is refused before an account is chosen or a body is parsed.
+    let presented = header_value(&request.headers, GRANT_HEADER);
+    let authority = match &presented {
+        Some(token) => match config.grants.lock() {
+            Ok(grants) => match grants.check(token, uid, now()) {
+                Ok(grant) => Some(Authority {
+                    run_id: grant.run_id.clone(),
+                    accounts: grant.accounts.clone(),
+                    model: grant.model.clone(),
+                }),
+                Err(why) => {
+                    counters.grants_refused.fetch_add(1, Ordering::Relaxed);
+                    let _ = writer.write_all(&refusal(403, "Forbidden", &format!("{why}")));
+                    let _ = writer.flush();
+                    return Ok(());
+                }
+            },
+            Err(_) => None,
+        },
+        None => None,
+    };
 
     let requested = select::model_of(&request.body);
     let thread = select::thread_of(&request.headers);
@@ -460,7 +504,20 @@ fn handle(config: &Config, counters: &Counters, stream: TcpStream) -> std::io::R
             .ok()
             .and_then(|pool| pool.bound_model(uid, thread, now()).map(str::to_string))
     });
-    let decision = policy::decide(&config.models, requested.as_deref(), bound.as_deref());
+    // A run that pinned a model gets it. Triage chose that model for the task,
+    // and the interactive policy is about sessions, not about pipeline work.
+    let decision = match authority.as_ref().and_then(|a| a.model.clone()) {
+        Some(pinned) => policy::decide(
+            &ModelPolicy {
+                assign: Some(pinned),
+                allowed: Vec::new(),
+                version: config.models.version.clone(),
+            },
+            requested.as_deref(),
+            None,
+        ),
+        None => policy::decide(&config.models, requested.as_deref(), bound.as_deref()),
+    };
     let model = decision.effective().map(str::to_string);
 
     let mut request = request;
@@ -482,7 +539,14 @@ fn handle(config: &Config, counters: &Counters, stream: TcpStream) -> std::io::R
     // a thread id arrives in a header and a header is whatever the caller says.
     let caller = thread.as_deref().map(|thread| (uid, thread));
 
-    match attempt(config, counters, &request, model.as_deref(), caller) {
+    match attempt(
+        config,
+        counters,
+        &request,
+        model.as_deref(),
+        caller,
+        authority.as_ref(),
+    ) {
         Ok(served) => {
             counters
                 .bytes_to_upstream
@@ -551,8 +615,28 @@ fn attempt(
     request: &Request,
     model: Option<&str>,
     caller: Option<(u32, &str)>,
+    authority: Option<&Authority>,
 ) -> Result<Served, Refused> {
-    let candidates = usable_names(config);
+    let mut candidates = usable_names(config);
+    // A run may only spend the accounts it was granted. Applied here rather than
+    // in selection so the refusal, when nothing is left, says why.
+    if let Some(authority) = authority
+        && !authority.accounts.is_empty()
+    {
+        candidates.retain(|name| authority.accounts.contains(name));
+        if candidates.is_empty() {
+            return Err(Refused {
+                status: 502,
+                reason: "Bad Gateway",
+                detail: format!(
+                    "run {} is limited to account(s) [{}], and none of them can serve \
+                     requests right now",
+                    authority.run_id,
+                    authority.accounts.join(", ")
+                ),
+            });
+        }
+    }
     let mut excluded: Vec<String> = Vec::new();
     let mut last: Option<String> = None;
     // Accounts already renewed once for this request, so a provider that keeps
@@ -574,13 +658,13 @@ fn attempt(
                             // 503 for exhaustion: the condition passes when a
                             // window resets, and a client should treat it as
                             // temporary. 502 for a pool that has nothing at all.
-                            NoAccount::AllExhausted => 503,
+                            NoAccount::AllExhausted | NoAccount::AllTried { .. } => 503,
                             NoAccount::NoneServesModel { .. } => 400,
                             NoAccount::PoolEmpty => 502,
                         },
                         reason: "Service Unavailable",
                         detail: match (&why, &last) {
-                            (NoAccount::AllExhausted, Some(last)) => {
+                            (NoAccount::AllExhausted | NoAccount::AllTried { .. }, Some(last)) => {
                                 format!("{why}; the last account tried was {last}")
                             }
                             _ => format!("{why}"),
@@ -710,6 +794,112 @@ renewed ({error}); it needs a fresh login"
             excluded.len()
         ),
     })
+}
+
+/// What a presented grant permits, reduced to what serving a request needs.
+struct Authority {
+    run_id: String,
+    accounts: Vec<String>,
+    model: Option<String>,
+}
+
+/// The path that mints and revokes run authority.
+pub const GRANT_PATH: &str = "/_timon/grant";
+
+fn is_grant_request(target: &str) -> bool {
+    let path = target.split('?').next().unwrap_or(target);
+    path.trim_end_matches('/') == GRANT_PATH
+}
+
+fn header_value(headers: &[(String, String)], want: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|(name, _)| name == want)
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Mints or revokes a grant for the calling principal.
+///
+/// The uid comes from the kernel, so a grant is always issued to whoever asked
+/// and can never be minted on somebody else's behalf.
+fn handle_grant(config: &Config, counters: &Counters, request: &Request, uid: u32) -> Vec<u8> {
+    if request.method != "POST" {
+        return refusal(
+            405,
+            "Method Not Allowed",
+            "POST a run id to mint a grant, or a run id with revoke=true to end one",
+        );
+    }
+    let body: serde_json::Value = match serde_json::from_slice(&request.body) {
+        Ok(body) => body,
+        Err(_) => return refusal(400, "Bad Request", "the body is not JSON"),
+    };
+    let Some(run_id) = body.get("run_id").and_then(|v| v.as_str()) else {
+        return refusal(400, "Bad Request", "no run_id");
+    };
+
+    let Ok(mut grants) = config.grants.lock() else {
+        return refusal(
+            500,
+            "Internal Server Error",
+            "the broker's grant state is poisoned; restart it",
+        );
+    };
+    grants.forget_stale(now());
+
+    if body
+        .get("revoke")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let ended = grants.revoke_run(run_id, uid);
+        return ok_json(&serde_json::json!({ "run_id": run_id, "revoked": ended }));
+    }
+
+    let accounts: Vec<String> = body
+        .get("accounts")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let lifetime = body
+        .get("lifetime_secs")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(3600);
+
+    match grants.issue(uid, run_id, accounts, model, lifetime, now()) {
+        Ok((token, grant)) => {
+            counters.grants_issued.fetch_add(1, Ordering::Relaxed);
+            ok_json(&serde_json::json!({
+                "grant": token,
+                "id": grant.id,
+                "run_id": grant.run_id,
+                "expires_at": grant.expires_at,
+                "accounts": grant.accounts,
+                "model": grant.model,
+                "header": GRANT_HEADER,
+            }))
+        }
+        Err(why) => refusal(500, "Internal Server Error", &why),
+    }
+}
+
+fn ok_json(value: &serde_json::Value) -> Vec<u8> {
+    let body = serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string());
+    format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncache-control: no-store\r\n\
+         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
 }
 
 /// Adds headers to a response head, after the status line.

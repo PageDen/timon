@@ -64,6 +64,7 @@ fn config(root: &std::path::Path, serving: &[&str]) -> Config {
         serving: serving.iter().map(|name| name.to_string()).collect(),
         pool: std::sync::Mutex::new(Pool::new()),
         models: timon::broker::policy::ModelPolicy::default(),
+        grants: std::sync::Mutex::new(timon::broker::grant::Grants::new()),
         read_timeout: std::time::Duration::from_secs(5),
     }
 }

@@ -276,6 +276,7 @@ fn the_client_is_told_on_the_response_which_model_actually_served_it() {
         serving: vec!["acct2".to_string()],
         pool: std::sync::Mutex::new(Pool::new()),
         models: policy("gpt-5.6-luna"),
+        grants: std::sync::Mutex::new(timon::broker::grant::Grants::new()),
         read_timeout: std::time::Duration::from_secs(20),
     });
     let counters = Arc::new(Counters::default());
