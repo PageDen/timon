@@ -22,5 +22,6 @@
 //! guess what "the base" meant.
 
 pub mod execute;
+pub mod pipeline;
 pub mod record;
 pub mod start;

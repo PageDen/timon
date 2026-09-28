@@ -1,0 +1,223 @@
+// Adapted for Timon. Not derived from Prodex source.
+//! The planner route, joined up.
+//!
+//! P1 recorded the run, P2 chose the route, P3 said what a valid graph is and
+//! what a dependency carries, P4 ran one and isolated the workers. Each worked
+//! on its own; nothing connected them, and the planner route reported that it
+//! was not built. This is the connection.
+//!
+//! The order is the whole design:
+//!
+//! 1. **The planner is asked for a graph**, not for an answer. It names tasks
+//!    and what each depends on; it does not run anything.
+//! 2. **The host validates it and refuses a bad one**, with every fault at
+//!    once. It does not repair a plan — repairing means deciding what the
+//!    planner meant, and the host does not author work.
+//! 3. **Each task runs in its own worktree**, from inputs the host assembled,
+//!    under a grant the broker issued.
+//! 4. **The host merges mechanically** onto a result branch and hands it over.
+//!
+//! What it deliberately does not do is judge the result. That is P5. A result
+//! branch out of here is a merge, not a recommendation, and the report says so
+//! rather than letting a developer read approval into a clean exit.
+
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
+use serde::Serialize;
+
+use crate::dag::{Limits, Plan, Validated, validate};
+use crate::dag_run::{Bounds, GraphReport, Runner, run_graph};
+use crate::run::record::Run;
+use crate::worktree::Workspace;
+
+/// Why a planned run could not be carried out.
+#[derive(Debug)]
+pub enum PipelineError {
+    /// The planner did not answer with a graph.
+    NotAPlan {
+        detail: String,
+        saw: String,
+    },
+    /// The graph was refused. Every fault, so one round trip fixes all of them.
+    InvalidPlan {
+        faults: Vec<String>,
+    },
+    /// No repository to work in, which a writing graph needs.
+    NoWorkspace,
+    Git(String),
+}
+
+impl std::fmt::Display for PipelineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PipelineError::NotAPlan { detail, saw } => write!(
+                f,
+                "the planner did not return a task graph ({detail}). It said: {saw}"
+            ),
+            PipelineError::InvalidPlan { faults } => {
+                write!(f, "the plan was refused:\n  - {}", faults.join("\n  - "))
+            }
+            PipelineError::NoWorkspace => write!(
+                f,
+                "this run has no repository, so there is nowhere to put a worktree"
+            ),
+            PipelineError::Git(detail) => write!(f, "{detail}"),
+        }
+    }
+}
+
+impl std::error::Error for PipelineError {}
+
+/// What the planner route produced.
+#[derive(Debug, Serialize)]
+pub struct PipelineReport {
+    pub run_id: String,
+    /// The planner's own reasoning about the split, in its words.
+    pub notes: String,
+    pub graph: GraphReport,
+    /// The branch to review, when integration got that far.
+    pub result_branch: Option<String>,
+    /// Said plainly, because a clean exit is not approval.
+    pub verified: bool,
+    pub caveat: &'static str,
+}
+
+/// What a planner route needs from the host.
+pub struct Pipeline<'a, R: Runner + Sync> {
+    pub runner: &'a R,
+    pub workspace: Option<Workspace>,
+    pub limits: Limits,
+    pub bounds: Bounds,
+    pub cancel: Arc<AtomicBool>,
+}
+
+/// Asks the planner for a graph.
+///
+/// The prompt says what a dependency means here, because a planner that thinks
+/// `depends_on` is only ordering will write graphs whose dependants cannot see
+/// what they depend on — which is the mistake the host spent P3 fixing.
+pub fn plan_prompt(goal: &str, limits: &Limits) -> String {
+    format!(
+        "You are planning how to carry out this goal:\n\n{goal}\n\n\
+Split it into tasks that can be worked on separately. Each task is given to a \
+worker that starts fresh: it sees only the text you write for it, not this \
+instruction, not the goal, and not the other tasks. So each task must stand on \
+its own.\n\n\
+When one task needs another's output, name it in `depends_on`. That is not just \
+ordering: the host gives a dependent task what its dependencies actually \
+produced, so say what you need rather than describing it.\n\n\
+Mark a task `\"access\": \"write\"` when it changes files, and `\"read\"` when it \
+only reads. Writing tasks that touch the same code should be one task, not \
+several — separate workers editing the same files conflict, and the host will \
+not choose between them.\n\n\
+At most {} tasks, at most {} deep. Fewer where fewer will do.\n\n\
+Reply with JSON only:\n\
+{{\"tasks\":[{{\"label\":\"short-name\",\"task\":\"the complete task\",\"depends_on\":[],\"access\":\"read\"}}],\"notes\":\"why you split it this way\"}}",
+        limits.max_tasks, limits.max_depth
+    )
+}
+
+/// Reads a plan out of whatever the planner said.
+///
+/// Tolerant of a model that wrapped its JSON in prose or a fence, because that
+/// is a formatting slip rather than a refusal to plan, and a round trip to
+/// correct it costs a model call.
+pub fn parse_plan(answer: &str) -> Result<Plan, PipelineError> {
+    let candidate = extract_json(answer).ok_or_else(|| PipelineError::NotAPlan {
+        detail: "no JSON object in the answer".to_string(),
+        saw: first_line(answer),
+    })?;
+    serde_json::from_str(&candidate).map_err(|error| PipelineError::NotAPlan {
+        detail: error.to_string(),
+        saw: first_line(&candidate),
+    })
+}
+
+fn extract_json(text: &str) -> Option<String> {
+    let start = text.find('{')?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, ch) in text[start..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => depth += 1,
+            '}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(text[start..start + offset + 1].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn first_line(text: &str) -> String {
+    text.lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .chars()
+        .take(200)
+        .collect()
+}
+
+/// Validates a plan, turning faults into something a planner can act on.
+pub fn accept(plan: &Plan, limits: &Limits) -> Result<Validated, PipelineError> {
+    validate(plan, limits).map_err(|faults| PipelineError::InvalidPlan {
+        faults: faults.iter().map(|fault| fault.to_string()).collect(),
+    })
+}
+
+/// Runs an accepted graph and merges what it produced.
+///
+/// Integration happens even when tasks failed: the branches that did succeed are
+/// still work somebody may want, and withholding them because a sibling failed
+/// decides for the developer. What does not happen is any claim about quality.
+pub fn carry_out<R: Runner + Sync>(
+    run: &Run,
+    graph: &Validated,
+    pipeline: &mut Pipeline<'_, R>,
+) -> PipelineReport {
+    let report = run_graph(
+        graph,
+        pipeline.runner,
+        &pipeline.bounds,
+        Arc::clone(&pipeline.cancel),
+    );
+
+    let result_branch = match pipeline.workspace.as_mut() {
+        Some(workspace) => {
+            let finished: Vec<String> = report
+                .tasks
+                .iter()
+                .filter(|task| task.outcome.finished())
+                .map(|task| task.label.clone())
+                .collect();
+            if finished.is_empty() {
+                None
+            } else {
+                workspace.integrate(&finished).ok()
+            }
+        }
+        None => None,
+    };
+
+    PipelineReport {
+        run_id: run.id.clone(),
+        notes: graph.notes.clone(),
+        graph: report,
+        result_branch,
+        verified: false,
+        caveat: "Nothing here judged the result. The branch is a merge of what the \
+                 workers produced, not a recommendation: the verifier that would \
+                 decide whether it is worth offering is P5 and is not built.",
+    }
+}
