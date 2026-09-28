@@ -350,7 +350,7 @@ impl<T: Read + Write> ReadWrite for T {}
 ///
 /// The name is checked against the certificate, so an address that was safe to
 /// connect to cannot then present itself as somewhere else.
-fn tls(
+pub fn tls(
     stream: TcpStream,
     host: &str,
 ) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, FetchError> {

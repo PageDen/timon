@@ -256,6 +256,29 @@ enum UsageCommand {
 enum BrokerCommand {
     /// Show the pooled accounts, and whether rotation is possible
     Accounts(BrokerAccountsArgs),
+    /// Forward Codex traffic, injecting a pooled credential the caller cannot see
+    Serve(BrokerServeArgs),
+}
+
+#[derive(Args)]
+struct BrokerServeArgs {
+    /// The account store.
+    #[arg(long, default_value = "/var/lib/timon-broker/accounts")]
+    store: PathBuf,
+    /// Which pooled account to serve. Slice 2 serves exactly one; rotation
+    /// across several is the next slice.
+    #[arg(long)]
+    account: String,
+    /// Loopback address to listen on. Refuses to bind anywhere else: this holds
+    /// credentials for everyone, and reaching it must require being on the host.
+    #[arg(long, default_value = "127.0.0.1:1456")]
+    listen: String,
+    /// Where to forward. Defaults to the endpoint Codex uses itself.
+    #[arg(long)]
+    upstream: Option<String>,
+    /// Seconds a client may hold a connection without completing a request.
+    #[arg(long, default_value_t = 120)]
+    read_timeout_secs: u64,
 }
 
 #[derive(Args)]
@@ -606,6 +629,7 @@ fn run() -> Result<u8> {
         Command::Mcp(args) => return mcp_serve(args),
         Command::Bridge(args) => return bridge_appserver(args),
         Command::Broker(BrokerCommand::Accounts(args)) => return broker_accounts(args),
+        Command::Broker(BrokerCommand::Serve(args)) => return broker_serve(args),
         Command::Orchestrate(args) => return orchestrate_run(args),
     };
     attempt_run(role, args)
@@ -874,6 +898,65 @@ fn broker_accounts(args: BrokerAccountsArgs) -> Result<u8> {
     } else {
         1
     })
+}
+
+fn broker_serve(args: BrokerServeArgs) -> Result<u8> {
+    use std::sync::Arc;
+
+    let listen: std::net::SocketAddr = args
+        .listen
+        .parse()
+        .with_context(|| format!("--listen {} is not an address", args.listen))?;
+    if !listen.ip().is_loopback() {
+        // Refused rather than warned. This process holds credentials for
+        // everyone who uses it; something reachable off the host would let
+        // anyone who can route to it spend that quota, and the caller-identity
+        // check depends on the peer being local.
+        bail!(
+            "--listen {listen} is not a loopback address. The broker holds pooled \
+             credentials and identifies callers by their local uid, neither of \
+             which survives being reachable from the network."
+        );
+    }
+
+    let store = broker::store::Store::open(&args.store).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let account = store.read(&args.account);
+    if !account.usable() {
+        bail!(
+            "account {:?} cannot serve requests:\n  - {}",
+            args.account,
+            account.faults.join("\n  - ")
+        );
+    }
+
+    // Read here and held in memory only. The value is never logged, never
+    // rendered, and never returned to a caller.
+    let credential = broker::store::credential_of(&account)
+        .map_err(|e| anyhow::anyhow!("reading the credential for {:?}: {e}", args.account))?;
+
+    let config = Arc::new(broker::serve::Config {
+        listen,
+        upstream: args
+            .upstream
+            .unwrap_or_else(|| broker::serve::DEFAULT_UPSTREAM.to_string()),
+        bearer: credential.bearer,
+        account_id: credential.account_id,
+        read_timeout: std::time::Duration::from_secs(args.read_timeout_secs),
+    });
+    let counters = Arc::new(broker::serve::Counters::default());
+    let listener =
+        std::net::TcpListener::bind(listen).with_context(|| format!("binding {listen}"))?;
+
+    eprintln!(
+        "timon broker: serving account {:?} on {} -> {}",
+        args.account, listen, config.upstream
+    );
+    eprintln!(
+        "  callers are identified by uid from the kernel; a request whose caller \
+cannot be identified is refused, never attributed to a default."
+    );
+    broker::serve::serve(config, counters, listener, Arc::new(|| false))?;
+    Ok(0)
 }
 
 fn bridge_appserver(args: BridgeArgs) -> Result<u8> {
