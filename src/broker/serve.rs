@@ -25,16 +25,22 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
 
 use crate::broker::identity::peer_uid;
+use crate::broker::select::{self, NoAccount, Pool};
+use crate::broker::store::{Account, Credential};
 
 /// Where subscription-mode Codex sends its traffic when nothing redirects it.
-pub const DEFAULT_UPSTREAM: &str = "https://chat.openai.com/backend-api/codex";
+///
+/// `chatgpt.com`, not `chat.openai.com`. The other host answers, and answers with
+/// a 401 saying the login "did not make it to this service", which reads like a
+/// credential problem and is not one.
+pub const DEFAULT_UPSTREAM: &str = "https://chatgpt.com/backend-api/codex";
 
 /// Longest request line or header line accepted, so a hostile client cannot
 /// exhaust memory before it has authenticated to anything.
@@ -69,6 +75,12 @@ pub struct Counters {
     pub connections: AtomicU64,
     pub requests_forwarded: AtomicU64,
     pub requests_refused_unidentified: AtomicU64,
+    /// Requests refused because the pool had nothing that could serve them.
+    pub requests_refused_no_account: AtomicU64,
+    /// Requests served by a second account after the first could not serve them.
+    pub rotations: AtomicU64,
+    pub refreshes: AtomicU64,
+    pub quota_reads: AtomicU64,
     pub bytes_to_upstream: AtomicU64,
     pub bytes_to_client: AtomicU64,
 }
@@ -316,16 +328,39 @@ pub fn relay<R: Read, W: Write>(from: &mut R, to: &mut W) -> std::io::Result<u64
 }
 
 /// How the listener is configured.
+///
+/// Holds the store rather than a credential. A credential is loaded per request
+/// and dropped when the request ends, so a token that was refreshed since the
+/// process started is picked up without a restart, and no token sits in this
+/// struct where a future `Debug` on it could print one.
 pub struct Config {
     pub listen: SocketAddr,
-    /// Upstream base, e.g. `https://chat.openai.com/backend-api/codex`.
+    /// Upstream base, e.g. `https://chatgpt.com/backend-api/codex`.
     pub upstream: String,
-    /// Bearer token to inject. Slice 2 serves one account.
-    pub bearer: String,
-    pub account_id: Option<String>,
+    pub store: crate::broker::store::Store,
+    /// The accounts this listener may use, in preference order.
+    ///
+    /// Held separately from the store so that `--account` pins the pool to one
+    /// account rather than merely naming the first one tried. An account added to
+    /// the store while the broker runs is picked up only if it is named here.
+    pub serving: Vec<String>,
+    /// What the broker has learned about the pool: usage, refusals, affinity.
+    pub pool: Mutex<Pool>,
     /// How long a client may hold a connection without completing a request.
     pub read_timeout: Duration,
 }
+
+/// Most accounts tried for one request before it is refused.
+///
+/// Bounded so a pool where every account refuses a model costs one round of
+/// attempts rather than a retry storm.
+const MAX_ATTEMPTS: usize = 4;
+
+/// Largest upstream error body read before deciding whether to rotate.
+///
+/// Error bodies are small. Successful responses are never read here at all; they
+/// are relayed.
+const MAX_ERROR_BODY: usize = 64 * 1024;
 
 /// Serves until `stop` reports true, one thread per connection.
 pub fn serve(
@@ -392,60 +427,388 @@ fn handle(config: &Config, counters: &Counters, stream: TcpStream) -> std::io::R
         }
     };
 
-    counters
-        .bytes_to_upstream
-        .fetch_add(request.body.len() as u64, Ordering::Relaxed);
-    counters.requests_forwarded.fetch_add(1, Ordering::Relaxed);
     // `uid` is what a later slice records alongside the usage; nothing is written
-    // here, because slice 2 does not record.
+    // here, because this slice does not record.
     let _ = uid;
 
-    match forward(config, &request) {
-        Ok(mut upstream) => {
-            let sent = relay(&mut upstream, &mut writer)?;
-            counters.bytes_to_client.fetch_add(sent, Ordering::Relaxed);
+    let model = select::model_of(&request.body);
+    let thread = select::thread_of(&request.headers);
+
+    match attempt(
+        config,
+        counters,
+        &request,
+        model.as_deref(),
+        thread.as_deref(),
+    ) {
+        Ok(served) => {
+            counters
+                .bytes_to_upstream
+                .fetch_add(request.body.len() as u64, Ordering::Relaxed);
+            counters.requests_forwarded.fetch_add(1, Ordering::Relaxed);
+            if served.attempts > 1 {
+                counters.rotations.fetch_add(1, Ordering::Relaxed);
+            }
+            // The thread is bound only once a request on it has actually been
+            // served, so an account that could not serve the first turn does not
+            // capture the conversation.
+            if let Some(thread) = thread.as_deref()
+                && let Ok(mut pool) = config.pool.lock()
+            {
+                pool.bind(thread, &served.account, now());
+            }
+            writer.write_all(&served.head)?;
+            writer.flush()?;
+            let mut rest = served.rest;
+            let sent = relay(&mut rest, &mut writer)?;
+            counters
+                .bytes_to_client
+                .fetch_add(sent + served.head.len() as u64, Ordering::Relaxed);
         }
-        Err(error) => {
-            let _ = writer.write_all(&refusal(
-                502,
-                "Bad Gateway",
-                &format!("the broker could not reach the provider: {error}"),
-            ));
+        Err(refused) => {
+            counters
+                .requests_refused_no_account
+                .fetch_add(1, Ordering::Relaxed);
+            let _ = writer.write_all(&refusal(refused.status, refused.reason, &refused.detail));
             let _ = writer.flush();
         }
     }
     Ok(())
 }
 
-/// Opens the upstream connection and sends the rewritten request.
+/// A response from an account, with its head already read.
+struct Served {
+    account: String,
+    /// The response head, verbatim, to be written to the client unchanged.
+    head: Vec<u8>,
+    /// Everything after the head, still arriving.
+    rest: Box<dyn Read>,
+    /// How many accounts were tried, so a rotation can be counted.
+    attempts: usize,
+}
+
+/// A refusal to send back, in the client's terms.
+struct Refused {
+    status: u16,
+    reason: &'static str,
+    detail: String,
+}
+
+/// Serves one request, rotating accounts while it is still safe to do so.
 ///
-/// Returns the stream positioned at the response, for the caller to relay.
-fn forward(config: &Config, request: &Request) -> std::io::Result<Box<dyn Read>> {
+/// Rotation happens only before anything has been written to the client. Once the
+/// first byte of a response has gone out, the request belongs to that account
+/// whatever happens next: switching then would splice two answers together.
+fn attempt(
+    config: &Config,
+    counters: &Counters,
+    request: &Request,
+    model: Option<&str>,
+    thread: Option<&str>,
+) -> Result<Served, Refused> {
+    let candidates = usable_names(config);
+    let mut excluded: Vec<String> = Vec::new();
+    let mut last: Option<String> = None;
+
+    for round in 1..=MAX_ATTEMPTS {
+        let name = {
+            let mut pool = config.pool.lock().map_err(|_| Refused {
+                status: 500,
+                reason: "Internal Server Error",
+                detail: "the broker's account state is poisoned; restart it".to_string(),
+            })?;
+            match pool.choose(&candidates, model, thread, &excluded, now()) {
+                Ok(name) => name,
+                Err(why) => {
+                    return Err(Refused {
+                        status: match why {
+                            // 503 for exhaustion: the condition passes when a
+                            // window resets, and a client should treat it as
+                            // temporary. 502 for a pool that has nothing at all.
+                            NoAccount::AllExhausted => 503,
+                            NoAccount::NoneServesModel { .. } => 400,
+                            NoAccount::PoolEmpty => 502,
+                        },
+                        reason: "Service Unavailable",
+                        detail: match (&why, &last) {
+                            (NoAccount::AllExhausted, Some(last)) => {
+                                format!("{why}; the last account tried was {last}")
+                            }
+                            _ => format!("{why}"),
+                        },
+                    });
+                }
+            }
+        };
+
+        let account = config.store.read(&name);
+        let credential = match prepare(&account, counters) {
+            Ok(credential) => credential,
+            Err(why) => {
+                // An account whose credential will not load is out for this
+                // request. It is not marked refused for the model, because the
+                // model is not what is wrong with it.
+                eprintln!("timon broker: account {name} unavailable: {why}");
+                excluded.push(name.clone());
+                last = Some(name);
+                continue;
+            }
+        };
+
+        // Usage is read only when there is a choice to make. A single-account
+        // pool has nothing to decide, and paying for an extra round trip to the
+        // provider on every request would be latency spent on no decision.
+        if candidates.len() > 1 {
+            refresh_standing(config, counters, &name, &credential);
+        }
+
+        match open(config, request, &credential) {
+            Ok(response) if response.status < 400 => {
+                return Ok(Served {
+                    account: name,
+                    head: response.head,
+                    rest: response.rest,
+                    attempts: round,
+                });
+            }
+            Ok(response) => {
+                let body = read_bounded(response.rest);
+                if let Some(model) = model
+                    && model_unavailable(response.status, &body)
+                {
+                    // Proven in testing: an account can list a model in its
+                    // catalog and still refuse to serve it. Remember it against
+                    // this account and try the next one.
+                    if let Ok(mut pool) = config.pool.lock() {
+                        pool.refused(&name, model, now());
+                    }
+                    eprintln!(
+                        "timon broker: account {name} cannot serve {model} \
+                         (status {}); trying another",
+                        response.status
+                    );
+                    excluded.push(name.clone());
+                    last = Some(name);
+                    continue;
+                }
+                if response.status == 401 || response.status == 403 {
+                    // The credential was refreshed before this attempt if it was
+                    // due, so a refusal now is about the account, not the clock.
+                    eprintln!(
+                        "timon broker: account {name} was refused by the provider \
+                         (status {}); trying another",
+                        response.status
+                    );
+                    excluded.push(name.clone());
+                    last = Some(name);
+                    continue;
+                }
+                // Any other error is the provider's answer to this request and
+                // is passed through unchanged, head and body.
+                let mut head = response.head;
+                head.extend_from_slice(&body);
+                return Ok(Served {
+                    account: name,
+                    head,
+                    rest: Box::new(std::io::empty()),
+                    attempts: round,
+                });
+            }
+            Err(error) => {
+                eprintln!("timon broker: reaching the provider as {name} failed: {error}");
+                excluded.push(name.clone());
+                last = Some(name);
+                continue;
+            }
+        }
+    }
+
+    Err(Refused {
+        status: 503,
+        reason: "Service Unavailable",
+        detail: format!(
+            "the broker tried {} account(s) and none could serve the request",
+            excluded.len()
+        ),
+    })
+}
+
+/// The accounts this listener may use that have no fault of their own.
+///
+/// Re-read per request rather than cached: an account whose credential file was
+/// repaired while the broker ran becomes usable again without a restart, and one
+/// that broke stops being offered.
+fn usable_names(config: &Config) -> Vec<String> {
+    config
+        .serving
+        .iter()
+        .filter(|name| config.store.read(name).usable())
+        .cloned()
+        .collect()
+}
+
+/// Loads an account's credential, refreshing it first if it is close to expiry.
+///
+/// Refresh happens here rather than on a timer because this is the moment the
+/// token is about to be used, and a refresh token is single-use: refreshing from
+/// two places at once would leave one of them holding a token that is already
+/// dead. The per-account lock inside `refresh` is what makes that safe.
+fn prepare(account: &Account, counters: &Counters) -> Result<Credential, String> {
+    let credential = crate::broker::store::credential_of(account).map_err(|e| format!("{e}"))?;
+    if !crate::broker::refresh::due(&credential.bearer, now()) {
+        return Ok(credential);
+    }
+    match crate::broker::refresh::refresh(&account.home) {
+        Ok(_) => {
+            counters.refreshes.fetch_add(1, Ordering::Relaxed);
+            // Re-read: the refresh wrote a new token to the file, and the copy in
+            // hand is the old one.
+            crate::broker::store::credential_of(account).map_err(|e| format!("{e}"))
+        }
+        // A refresh that fails is reported and the existing token is still tried.
+        // It may have minutes left on it, and a request served is better than a
+        // request refused on a prediction.
+        Err(error) => {
+            eprintln!(
+                "timon broker: refreshing {} failed: {error}; using the existing token",
+                account.name
+            );
+            Ok(credential)
+        }
+    }
+}
+
+/// Reads this account's usage from the provider, unless a recent reading stands.
+fn refresh_standing(config: &Config, counters: &Counters, name: &str, credential: &Credential) {
+    let fresh = config
+        .pool
+        .lock()
+        .ok()
+        .and_then(|pool| pool.standing(name).map(|standing| !standing.stale(now())))
+        .unwrap_or(false);
+    if fresh {
+        return;
+    }
+    let Some(account_id) = credential.account_id.as_deref() else {
+        return;
+    };
+    counters.quota_reads.fetch_add(1, Ordering::Relaxed);
+    match crate::broker::quota::read(&credential.bearer, account_id, now()) {
+        Ok(standing) => {
+            if let Ok(mut pool) = config.pool.lock() {
+                pool.observe(name, standing);
+            }
+        }
+        // A usage endpoint that will not answer must not stop the broker serving.
+        // Selection treats an account with no reading as eligible.
+        Err(error) => eprintln!("timon broker: reading usage for {name} failed: {error}"),
+    }
+}
+
+/// True when this status and body mean *this account cannot have this model*,
+/// as opposed to any other kind of failure.
+///
+/// Matched on the provider's own wording rather than the status alone, because a
+/// 404 also means a mistyped path, and rotating the whole pool over a typo would
+/// hide the mistake behind four identical failures.
+pub fn model_unavailable(status: u16, body: &[u8]) -> bool {
+    if status != 404 && status != 400 {
+        return false;
+    }
+    let text = String::from_utf8_lossy(body).to_lowercase();
+    (text.contains("model") && (text.contains("not found") || text.contains("does not exist")))
+        || text.contains("model_not_found")
+        || text.contains("does not have access to model")
+        || text.contains("unsupported_model")
+}
+
+/// Reads a bounded amount of an error body.
+fn read_bounded(mut from: Box<dyn Read>) -> Vec<u8> {
+    let mut body = Vec::new();
+    let mut limited = from.by_ref().take(MAX_ERROR_BODY as u64);
+    let _ = limited.read_to_end(&mut body);
+    body
+}
+
+/// Seconds since the epoch.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+/// An upstream response with its head read and its body still arriving.
+struct Response {
+    status: u16,
+    head: Vec<u8>,
+    rest: Box<dyn Read>,
+}
+
+/// Opens the upstream connection, sends the rewritten request, and reads back the
+/// response head.
+///
+/// The head is read here and not relayed immediately because the status decides
+/// whether this account can serve the request at all. It is kept verbatim so that
+/// passing it on later is byte-identical to what the provider sent.
+fn open(config: &Config, request: &Request, credential: &Credential) -> std::io::Result<Response> {
     let (scheme, host, port, prefix) = split_upstream(&config.upstream)?;
     let bytes = upstream_request(
         request,
         &prefix,
         &host,
-        &config.bearer,
-        config.account_id.as_deref(),
+        &credential.bearer,
+        credential.account_id.as_deref(),
     );
 
     let address = format!("{host}:{port}");
     let stream = TcpStream::connect(&address)?;
     stream.set_read_timeout(Some(Duration::from_secs(600)))?;
 
-    if scheme == "http" {
+    let raw: Box<dyn Read> = if scheme == "http" {
         let mut stream = stream;
         stream.write_all(&bytes)?;
         stream.flush()?;
-        return Ok(Box::new(stream));
-    }
+        Box::new(stream)
+    } else {
+        let mut tls = crate::research::fetch::tls(stream, &host)
+            .map_err(|error| std::io::Error::other(format!("{error}")))?;
+        tls.write_all(&bytes)?;
+        tls.flush()?;
+        Box::new(tls)
+    };
 
-    let mut tls = crate::research::fetch::tls(stream, &host)
-        .map_err(|error| std::io::Error::other(format!("{error}")))?;
-    tls.write_all(&bytes)?;
-    tls.flush()?;
-    Ok(Box::new(tls))
+    let mut reader = BufReader::new(raw);
+    let mut head = Vec::new();
+    loop {
+        let mut line = Vec::new();
+        let read = reader.read_until(b'\n', &mut line)?;
+        if read == 0 {
+            break;
+        }
+        if head.len() + line.len() > MAX_LINE * MAX_HEADERS {
+            return Err(std::io::Error::other("upstream response head is too large"));
+        }
+        let blank = line == b"\r\n" || line == b"\n";
+        head.extend_from_slice(&line);
+        if blank {
+            break;
+        }
+    }
+    let status =
+        status_of(&head).ok_or_else(|| std::io::Error::other("upstream sent no status line"))?;
+    Ok(Response {
+        status,
+        head,
+        rest: Box::new(reader),
+    })
+}
+
+/// Reads the status code out of a response head.
+pub fn status_of(head: &[u8]) -> Option<u16> {
+    let first = head.split(|byte| *byte == b'\n').next()?;
+    let text = String::from_utf8_lossy(first);
+    text.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// Splits an upstream base into scheme, host, port and path prefix.

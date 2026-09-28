@@ -33,5 +33,8 @@
 //! and no rotation — only the store and the means to see what is in it.
 
 pub mod identity;
+pub mod quota;
+pub mod refresh;
+pub mod select;
 pub mod serve;
 pub mod store;
