@@ -42,18 +42,23 @@ so, but a request asking for something the assigned model cannot do is not
 refused, because that needs a capability model per model. Guessing would be worse
 than the gap.
 
-## Blocking
+## Qualified, with two things to keep in view
 
-**The write-sandbox gate has not passed**, so P4.2's writing workers are not
-enabled. **No check now fails**; four have not been probed, and an unrun check
-keeps the gate shut exactly as a failure does. See
-`eval/results/write-sandbox-2026-09-28.json`.
+**The write-sandbox gate passes as of 2026-09-28**, all nine checks probed. See
+`eval/results/write-sandbox-2026-09-28.json`, which keeps every run including the
+two that did not pass.
 
-Three of the unprobed four need work to probe honestly: moving refs and running
-hooks need a scratch repository with a hook installed, and leaving processes
-behind needs a probe that survives its parent. The fourth, reading another
-account, cannot be probed on this host at all — there is only one account, and a
-check that cannot fail is not a check.
+Two results are narrower than their names, and both are recorded:
+
+*Hooks.* What was shown is that a `pre-commit` hook could not be triggered,
+because committing is refused. Not that every path to a hook is closed.
+
+*Processes.* The sandbox does **not** stop a worker spawning something that
+outlives it — under bare `codex exec` the background process survived. What makes
+the check hold is Timon's own worker supervision reaping the process group. The
+confinement comes from two places and only one of them is Codex's, so a change to
+worker supervision could break this without touching anything that looks like
+sandboxing.
 
 ## Operational
 
