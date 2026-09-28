@@ -15,6 +15,15 @@ use timon::broker::select::Pool;
 use timon::broker::serve::{Config, Counters, serve};
 use timon::broker::store::Store;
 
+/// Wall-clock seconds. `health::check` reads the real clock, so a test that
+/// fabricates a timestamp is testing nothing.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
 fn token(nick: &str) -> String {
     format!("eyJhbGciOiJub25lIn0.eyJleHAiOjQwMDAwMDAwMDB9.sig-{nick}")
 }
@@ -187,4 +196,74 @@ fn a_health_check_is_answered_locally_and_never_forwarded() {
          pollute the numbers it reports"
     );
     assert!(!response.contains("sig-acct2"), "no token may appear");
+}
+
+#[test]
+fn an_account_the_provider_refused_is_not_counted_as_usable() {
+    // The failure that motivated this: a subscription change invalidated a token
+    // that still had nine days left on it. Nothing in the credential file showed
+    // it — permissions fine, refresh token present, expiry far away — so a health
+    // check reading only the file called the account healthy while every request
+    // to it was refused.
+    let root = tempfile::tempdir().unwrap();
+    account(root.path(), "acct2");
+    account(root.path(), "acct3");
+    let config = config(root.path(), &["acct2", "acct3"]);
+
+    let before = health::check(&config, &Counters::default());
+    assert_eq!(before.accounts_usable, 2);
+    assert!(before.accounts_rejected.is_empty());
+
+    config.pool.lock().unwrap().rejected("acct3", now());
+
+    let after = health::check(&config, &Counters::default());
+    assert_eq!(
+        after.accounts_usable, 1,
+        "a refused account must not be counted as able to serve"
+    );
+    assert_eq!(after.accounts_rejected, vec!["acct3".to_string()]);
+    assert!(
+        after.healthy,
+        "one refused account of two is not a broker fault: the pool still works, \
+         and restarting over it would help nobody"
+    );
+}
+
+#[test]
+fn every_account_refused_is_a_fault_that_names_the_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    account(root.path(), "acct2");
+    let config = config(root.path(), &["acct2"]);
+    config.pool.lock().unwrap().rejected("acct2", now());
+
+    let state = health::check(&config, &Counters::default());
+    assert!(!state.healthy);
+    assert_eq!(state.accounts_usable, 0);
+    assert!(
+        state.faults.iter().any(|f| f.contains("broker refresh")),
+        "the fault should name the command that recovers it: {:?}",
+        state.faults
+    );
+}
+
+#[test]
+fn a_rejection_lapses_so_a_recovered_account_returns() {
+    let root = tempfile::tempdir().unwrap();
+    account(root.path(), "acct2");
+    let config = config(root.path(), &["acct2"]);
+    config.pool.lock().unwrap().rejected("acct2", now());
+    assert_eq!(
+        health::check(&config, &Counters::default()).accounts_usable,
+        0
+    );
+
+    // Fifteen minutes later it is tried again rather than staying out forever.
+    {
+        let mut pool = config.pool.lock().unwrap();
+        pool.forget_stale(now() + 901);
+    }
+    assert_eq!(
+        health::check(&config, &Counters::default()).accounts_usable,
+        1
+    );
 }

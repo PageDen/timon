@@ -42,6 +42,13 @@ use std::collections::HashMap;
 
 use crate::broker::quota::Standing;
 
+/// How long an account is left out after the provider refused its credential.
+///
+/// Shorter than a model refusal, because the condition is usually transient and
+/// self-healing: a refresh often fixes it, and the account should come back into
+/// the pool soon after rather than waiting out an hour it no longer needs.
+pub const REJECTION_SECS: i64 = 900;
+
 /// How long an account is left out for a model it refused.
 ///
 /// Long enough that a run of requests does not keep retrying an account that
@@ -90,6 +97,14 @@ pub struct Pool {
     standings: HashMap<String, Standing>,
     /// `(account, model)` to the time the exclusion lapses.
     refusals: HashMap<(String, String), i64>,
+    /// Accounts whose credential the provider refused, and when it lapses.
+    ///
+    /// Separate from a model refusal because it is not about the model: the
+    /// account cannot serve anything until its credential is renewed or
+    /// replaced. Held here rather than inferred from the file, because nothing
+    /// in the file shows it — a token can be invalidated by the provider while
+    /// still days from expiry, which is what a subscription change does.
+    rejections: HashMap<String, i64>,
     /// `(uid, thread-id)` to the account serving it, and when it was last seen.
     ///
     /// The uid is in the key because the thread is not trustworthy on its own:
@@ -109,6 +124,39 @@ impl Pool {
 
     pub fn standing(&self, account: &str) -> Option<&Standing> {
         self.standings.get(account)
+    }
+
+    /// Notes that the provider refused this account's credential outright.
+    pub fn rejected(&mut self, account: &str, now: i64) {
+        self.rejections
+            .insert(account.to_string(), now + REJECTION_SECS);
+    }
+
+    /// Notes that this account worked, clearing any earlier refusal of it.
+    ///
+    /// Called on success so a recovered account returns to the pool immediately
+    /// rather than serving out a penalty it no longer deserves.
+    pub fn accepted(&mut self, account: &str) {
+        self.rejections.remove(account);
+    }
+
+    /// True when the provider recently refused this account's credential.
+    pub fn is_rejected(&self, account: &str, now: i64) -> bool {
+        self.rejections
+            .get(account)
+            .is_some_and(|until| *until > now)
+    }
+
+    /// The accounts currently out because the provider refused them.
+    pub fn rejected_accounts(&self, now: i64) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .rejections
+            .iter()
+            .filter(|(_, until)| **until > now)
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.sort();
+        names
     }
 
     /// Notes that an account could not serve a model, so it is not tried again
@@ -147,6 +195,7 @@ impl Pool {
         self.affinity
             .retain(|_, (_, seen)| now - *seen <= AFFINITY_SECS);
         self.refusals.retain(|_, until| *until > now);
+        self.rejections.retain(|_, until| *until > now);
     }
 
     /// Chooses the account for one request.
@@ -173,6 +222,9 @@ impl Pool {
 
         let eligible = |account: &String| -> bool {
             if exclude.contains(account) {
+                return false;
+            }
+            if self.is_rejected(account, now) {
                 return false;
             }
             if let Some(model) = model
