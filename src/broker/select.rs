@@ -105,6 +105,12 @@ pub struct Pool {
     /// in the file shows it — a token can be invalidated by the provider while
     /// still days from expiry, which is what a subscription change does.
     rejections: HashMap<String, i64>,
+    /// `(uid, thread-id)` to the model this conversation is using.
+    ///
+    /// Bound on the first request and kept, so a policy change applies to new
+    /// conversations rather than switching models mid-conversation — which is
+    /// untested and may break a session's state.
+    models: HashMap<(u32, String), (String, i64)>,
     /// `(uid, thread-id)` to the account serving it, and when it was last seen.
     ///
     /// The uid is in the key because the thread is not trustworthy on its own:
@@ -187,6 +193,20 @@ impl Pool {
             .map(|(account, _)| account.as_str())
     }
 
+    /// Records the model a conversation is using.
+    pub fn bind_model(&mut self, uid: u32, thread: &str, model: &str, now: i64) {
+        self.models
+            .insert((uid, thread.to_string()), (model.to_string(), now));
+    }
+
+    /// The model this conversation is already using, if it has one.
+    pub fn bound_model(&self, uid: u32, thread: &str, now: i64) -> Option<&str> {
+        self.models
+            .get(&(uid, thread.to_string()))
+            .filter(|(_, seen)| now - *seen <= AFFINITY_SECS)
+            .map(|(model, _)| model.as_str())
+    }
+
     /// Drops bindings and refusals that have lapsed.
     ///
     /// Called on selection rather than on a timer: the map only grows when a
@@ -196,6 +216,8 @@ impl Pool {
             .retain(|_, (_, seen)| now - *seen <= AFFINITY_SECS);
         self.refusals.retain(|_, until| *until > now);
         self.rejections.retain(|_, until| *until > now);
+        self.models
+            .retain(|_, (_, seen)| now - *seen <= AFFINITY_SECS);
     }
 
     /// Chooses the account for one request.

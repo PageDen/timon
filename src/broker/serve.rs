@@ -33,6 +33,7 @@ use serde::Serialize;
 
 use crate::broker::health;
 use crate::broker::identity::peer_uid;
+use crate::broker::policy::{self, Decision, ModelPolicy};
 use crate::broker::select::{self, NoAccount, Pool};
 use crate::broker::store::{Account, Credential};
 
@@ -84,6 +85,9 @@ pub struct Counters {
     /// Renewals triggered by the provider refusing an unexpired token, which is
     /// how a subscription change presents.
     pub refreshes_after_refusal: AtomicU64,
+    /// Requests whose model was replaced by policy. Announced on the response as
+    /// well as counted, because a substitution nobody can see is the failure.
+    pub model_substitutions: AtomicU64,
     pub quota_reads: AtomicU64,
     pub bytes_to_upstream: AtomicU64,
     pub bytes_to_client: AtomicU64,
@@ -350,6 +354,9 @@ pub struct Config {
     pub serving: Vec<String>,
     /// What the broker has learned about the pool: usage, refusals, affinity.
     pub pool: Mutex<Pool>,
+    /// Which model a request gets. Empty by default: without configuration the
+    /// broker does not interfere with what a client asked for.
+    pub models: ModelPolicy,
     /// How long a client may hold a connection without completing a request.
     pub read_timeout: Duration,
 }
@@ -440,8 +447,37 @@ fn handle(config: &Config, counters: &Counters, stream: TcpStream) -> std::io::R
         return Ok(());
     }
 
-    let model = select::model_of(&request.body);
+    let requested = select::model_of(&request.body);
     let thread = select::thread_of(&request.headers);
+
+    // Policy first: the account is chosen for the model that will actually run,
+    // not the one the client asked for. Choosing on the requested model could
+    // pick an account that cannot serve the effective one.
+    let bound = thread.as_deref().and_then(|thread| {
+        config
+            .pool
+            .lock()
+            .ok()
+            .and_then(|pool| pool.bound_model(uid, thread, now()).map(str::to_string))
+    });
+    let decision = policy::decide(&config.models, requested.as_deref(), bound.as_deref());
+    let model = decision.effective().map(str::to_string);
+
+    let mut request = request;
+    if decision.rewrites()
+        && let Some(effective) = decision.effective()
+        && let Some(rewritten) = policy::rewrite_model(&request.body, effective)
+    {
+        request.body = rewritten;
+    }
+    if let Decision::Substituted {
+        requested,
+        effective,
+    } = &decision
+    {
+        counters.model_substitutions.fetch_add(1, Ordering::Relaxed);
+        eprintln!("timon broker: uid {uid} asked for {requested}; policy assigns {effective}");
+    }
     // The uid is not only for the record. It is half of the affinity key, because
     // a thread id arrives in a header and a header is whatever the caller says.
     let caller = thread.as_deref().map(|thread| (uid, thread));
@@ -462,8 +498,12 @@ fn handle(config: &Config, counters: &Counters, stream: TcpStream) -> std::io::R
                 && let Ok(mut pool) = config.pool.lock()
             {
                 pool.bind(uid, thread, &served.account, now());
+                if let Some(effective) = decision.effective() {
+                    pool.bind_model(uid, thread, effective, now());
+                }
             }
-            writer.write_all(&served.head)?;
+            let head = announce(&served.head, &policy::headers(&config.models, &decision));
+            writer.write_all(&head)?;
             writer.flush()?;
             let mut rest = served.rest;
             let sent = relay(&mut rest, &mut writer)?;
@@ -670,6 +710,27 @@ renewed ({error}); it needs a fresh login"
             excluded.len()
         ),
     })
+}
+
+/// Adds headers to a response head, after the status line.
+///
+/// The client learns which model served it without having to ask. Inserted
+/// rather than rebuilt, so everything the provider sent is passed through
+/// exactly as it arrived.
+fn announce(head: &[u8], extra: &[(String, String)]) -> Vec<u8> {
+    if extra.is_empty() {
+        return head.to_vec();
+    }
+    let Some(line_end) = head.windows(2).position(|w| w == b"\r\n") else {
+        return head.to_vec();
+    };
+    let mut out = Vec::with_capacity(head.len() + 64 * extra.len());
+    out.extend_from_slice(&head[..line_end + 2]);
+    for (name, value) in extra {
+        out.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+    }
+    out.extend_from_slice(&head[line_end + 2..]);
+    out
 }
 
 /// The accounts this listener may use that have no fault of their own.
