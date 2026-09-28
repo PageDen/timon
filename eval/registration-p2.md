@@ -20,11 +20,28 @@ They are separate and either can fail on its own.
 
 | Gate | Passes when | Does not establish |
 |---|---|---|
-| **Cost** | Fast-path total tokens are within a measured margin of calling the cheap model directly, with triage overhead reported rather than assumed zero | Anything about whether the answers are good |
+| **Cost** | Median fast-path tokens are **no more than 25% above** a direct cheap call on the same task, with triage overhead reported rather than assumed zero | Anything about whether the answers are good |
 | **Quality** | Task acceptance rate on the fast path is not worse than the direct cheap call, on the same fixtures | Anything about cost |
 
 Low overhead on a bad answer is not success. That is why quality is a gate and
 not a footnote.
+
+**Why 25%.** The fast path adds a broker hop and a grant round trip to a call
+that would otherwise go straight to the provider; none of that is model tokens,
+so on token count it should be close to free. The margin is there for the
+difference in how the two arms are prompted, not as room for orchestration
+overhead — the pilot's 1.365x is what this route exists to avoid, so a margin
+anywhere near that would make the gate meaningless. Fixed at 25% on 2026-09-28,
+before the gate was run.
+
+**Ground truth for the gate suite** was read from the repository at commit
+`c6f182e` and recorded in `eval/gate-p2-suite.json`, so a later disagreement is
+settled against the files rather than against anyone's memory.
+
+**The checker is self-tested before each run.** `eval/score-answer.py
+--self-test` covers thirteen cases, and the runner refuses to proceed if any
+fail. It caught its own first version treating "the value is 300." as wrong,
+because a sentence-ending full stop looked like part of a number.
 
 ## Measured
 
@@ -91,3 +108,94 @@ One rule changed in response to this measurement, which is what the suite is for
   are one code change now go to a single strong worker.
 
 The expectations were not moved to match the rules. Only the rules moved.
+
+
+## Run 1 — 2026-09-28 — inconclusive, and why
+
+20 paired calls, 113,355 tokens, on `acct3`. **The cost gate did not decide**,
+and reporting the number it produced would have been a claim the data does not
+support.
+
+| | |
+|---|---|
+| Median ratio | 1.495 (+49.5%) |
+| Paired delta | median +1,022 tokens, **range −3,862 to +6,826** |
+| Won by | timon 4 pairs, direct 6 |
+| Quality | 9/10 against 8/10 — **PASS** |
+
+The spread is ten times the effect and the arms traded wins. One task cost the
+*same arm* 4,267 tokens on one repeat and 16,343 on another. A median ratio over
+that is arithmetic, not a measurement.
+
+**Two faults in the harness, both fixed before rerunning.**
+
+*Arm order was confounded with arm.* Timon always ran first and the direct call
+second. Both arms showed the first repeat costing more than the second, which is
+what a warming prompt cache looks like. Order is randomised per pair now.
+
+*Two repeats could not see past the noise.* Raised to five, and the report now
+shows the interquartile range, the paired delta with its full range, and how many
+pairs each arm won. A result that cannot be distinguished from noise now says
+INCONCLUSIVE rather than printing a verdict.
+
+A third fault cost nothing to fix because the transcripts were kept: tokens were
+read only from stdout, and `codex exec` writes its token report to stderr when
+the streams are captured separately. The first report said "tokens median nan"
+and was re-scored from the saved logs rather than re-run. **This is the fifth
+instrument in this project to be wrong on first contact with real data, and the
+first where the fault was in the experimental design rather than the scoring.**
+
+## What 113,355 tokens did to the quota window
+
+Nothing visible. `acct3` read 0% before and 0% after. At this scale the provider's
+percentage is too coarse to attribute anything, so **token counts are the only
+usable cost measure for P2-sized work**, and the quota figure is for capacity
+planning rather than comparison. Recorded here because the plan's budget language
+is written in windows, and windows cannot see work this small.
+
+
+## Run 2 — 2026-09-28 — quality passes, cost is not settled
+
+25 paired calls with randomised arm order and five repeats per task.
+
+| | timon | direct |
+|---|---|---|
+| Tokens, median | 3,218 | 3,145 |
+| Tokens, IQR | 1,312 – 4,802 | 1,744 – 4,844 |
+| Accepted | **25/25** | **25/25** |
+| Latency, median | 8.5s | 10.0s |
+
+**Quality: PASS.** Both arms answered every task correctly.
+
+**Cost: INCONCLUSIVE.** Per-pair ratio has a median of 1.129 (+12.9%), inside the
+registered 25% margin — but 10 of 25 pairs sit outside it, and the paired delta
+ranges from −8,946 to +8,910 tokens. The typical pair is fine; the tail is not
+settled, and a margin test cannot be called passed while two pairs in five exceed
+it.
+
+There is no evidence the fast path is systematically expensive: it was cheaper in
+9 pairs and dearer in 16, and the spread swamps the lean. **No cause for the lean
+is offered, because none was established.**
+
+### What run 1's number was worth
+
+Run 1 reported a median ratio of **1.495**. Run 2, with the ordering confound
+removed, reports **1.129** on the same tasks and the same model. The first number
+was mostly an artefact of always running Timon first into a cold prompt cache.
+Had it been reported as a finding, it would have sent someone looking for a 50%
+overhead that does not exist.
+
+### A third instrument fault, and what it cost
+
+The quality gate first reported **FAIL, 21/25 against 22/25**. Every failure was
+the same task, and the recorded answer was `'Planner'`. The worker had answered
+correctly — *CheapWorker / StrongWorker / Planner*, on three lines — and the
+instrument kept only the last one. An answer is a block, not a line.
+
+Re-scored from saved transcripts: **25/25 on both arms.** No calls were repeated,
+because the transcripts were kept. That is now three instrument faults on this
+gate, two of them found only by looking at what the numbers were made of.
+
+**Standing rule from this:** a gate result is not reported until the failing
+cases have been read individually. A rate hides which case broke, and twice here
+the case that broke was the instrument.
