@@ -113,6 +113,12 @@ struct HandoffArgs {
     /// Makes resubmission idempotent: the same key returns the same run.
     #[arg(long)]
     submission_key: Option<String>,
+    /// Insist on a route instead of letting triage choose: cheap, strong or planner.
+    #[arg(long, value_parser = ["cheap", "strong", "planner"])]
+    route: Option<String>,
+    /// Allow the planner path. Without this the most that happens is one strong call.
+    #[arg(long)]
+    allow_planner: bool,
     /// The run store.
     #[arg(long)]
     store: Option<PathBuf>,
@@ -1152,14 +1158,36 @@ fn run_start(args: HandoffArgs) -> Result<u8> {
         }
     };
 
+    // Triage is deterministic, so it happens here rather than costing a model
+    // call to decide what a model call would cost.
+    let decision = timon::triage::decide(
+        &run.goal,
+        &timon::triage::Allowances {
+            route: args.route.as_deref().and_then(timon::triage::Route::parse),
+            allow_planner: args.allow_planner,
+        },
+    );
+    if let Err(error) = runs.record_triage(&run.id, &decision, now) {
+        // Recorded or not, the run exists. Losing the reasons costs a later
+        // measurement, not this run, so it is reported rather than fatal.
+        eprintln!("timon run: the triage decision could not be recorded: {error}");
+    }
+
     match args.format {
         ReportFormat::Csv => {
             eprintln!("csv is for usage exports; a run record is reported as text or json");
             return Ok(2);
         }
-        ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&run)?),
+        ReportFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "run": run,
+                "triage": decision,
+            }))?
+        ),
         ReportFormat::Text => {
             print!("{}", render_run(&run));
+            println!("  route       {}", decision.summary());
             println!(
                 "\nRecorded. This run outlives the terminal: `timon runs show {}` \n\
                  reports it later, and `timon runs cancel {}` stops it.",
@@ -1249,13 +1277,30 @@ fn runs_show(args: RunsShowArgs) -> Result<u8> {
             return Ok(1);
         }
     };
+    let triage = runs.triage_of(&run.id).unwrap_or_default();
     match args.format {
         ReportFormat::Csv => {
             eprintln!("csv is for usage exports; a run record is reported as text or json");
             return Ok(2);
         }
-        ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&run)?),
-        ReportFormat::Text => print!("{}", render_run(&run)),
+        ReportFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "run": run,
+                "triage": triage,
+            }))?
+        ),
+        ReportFormat::Text => {
+            print!("{}", render_run(&run));
+            if let Some(decision) = triage.first() {
+                println!("  route       {}", decision.summary());
+                // Every rule that fired, because one line cannot carry why a
+                // route was chosen over the two that were not.
+                for reason in &decision.reasons {
+                    println!("              · {} ({})", reason.detail, reason.rule);
+                }
+            }
+        }
     }
     Ok(0)
 }
