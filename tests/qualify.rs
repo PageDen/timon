@@ -1,0 +1,148 @@
+//! The gate that decides whether a worker may change code.
+//!
+//! The behaviour worth testing is what happens when the gate is *unsure*. A
+//! gate that opens because a probe was broken is the failure mode this exists to
+//! prevent, so an unrun check keeps it shut.
+
+use timon::qualify::{Check, Expected, Finding, Observed, Qualification, writing_permitted};
+
+fn finding(check: Check, observed: Observed) -> Finding {
+    Finding {
+        check,
+        expected: check.expected(),
+        observed,
+        probe: "probe".into(),
+        evidence: "evidence".into(),
+    }
+}
+
+fn all_passing() -> Qualification {
+    Qualification {
+        findings: Check::all()
+            .into_iter()
+            .map(|check| {
+                let observed = match check.expected() {
+                    Expected::Allowed => Observed::Allowed,
+                    Expected::Blocked => Observed::Blocked,
+                };
+                finding(check, observed)
+            })
+            .collect(),
+        host: "test-host".into(),
+        taken_at: 1_790_000_000,
+    }
+}
+
+#[test]
+fn a_fully_passing_qualification_permits_writing() {
+    let q = all_passing();
+    assert!(q.passed());
+    assert!(writing_permitted(Some(&q)).is_ok());
+}
+
+#[test]
+fn a_check_that_could_not_be_run_keeps_the_gate_shut() {
+    // An unrun check is an unknown, and unknown is not zero. A gate that opens
+    // because a probe was broken is the failure worth designing against.
+    let mut q = all_passing();
+    q.findings[3].observed = Observed::NotRun;
+    assert!(!q.passed());
+    let refused = writing_permitted(Some(&q)).unwrap_err();
+    assert!(refused.contains("has not qualified"), "{refused}");
+}
+
+#[test]
+fn a_missing_check_keeps_the_gate_shut_too() {
+    // Not just a failing one: a qualification that simply does not mention a
+    // check has not made a claim about it.
+    let mut q = all_passing();
+    q.findings.pop();
+    assert!(!q.passed());
+}
+
+#[test]
+fn never_qualifying_is_not_the_same_as_passing() {
+    let refused = writing_permitted(None).unwrap_err();
+    assert!(refused.contains("never been qualified"));
+    assert!(
+        refused.contains("timon qualify write-sandbox"),
+        "the refusal should say how to fix it: {refused}"
+    );
+}
+
+#[test]
+fn the_credential_check_is_the_one_this_host_fails() {
+    // Measured on 2026-09-28: a worker read the broker's store through the
+    // write sandbox. Recorded as a test so the day it starts passing is
+    // visible, rather than being noticed by accident.
+    let mut q = all_passing();
+    q.findings
+        .iter_mut()
+        .find(|f| f.check == Check::ReadCredentials)
+        .unwrap()
+        .observed = Observed::Allowed;
+
+    assert!(!q.passed());
+    let failures = q.failures();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].check, Check::ReadCredentials);
+
+    let rendered = q.render();
+    assert!(rendered.contains("NOT PASSED"));
+    assert!(
+        rendered.contains("only holder"),
+        "the report should say why it matters: {rendered}"
+    );
+}
+
+#[test]
+fn only_writing_inside_the_worktree_is_supposed_to_be_allowed() {
+    // Everything else is a confinement the sandbox must enforce. If this list
+    // ever grows an exception, it should be a deliberate edit and not a
+    // surprise.
+    for check in Check::all() {
+        let expected = check.expected();
+        if check == Check::WriteInsideWorktree {
+            assert_eq!(expected, Expected::Allowed);
+        } else {
+            assert_eq!(expected, Expected::Blocked, "{check:?}");
+        }
+    }
+}
+
+#[test]
+fn every_check_says_why_it_is_a_check() {
+    // A gate item nobody can justify gets dropped the first time it is
+    // inconvenient.
+    for check in Check::all() {
+        assert!(check.why().len() > 30, "{check:?}: {}", check.why());
+        assert!(!check.as_str().is_empty());
+    }
+}
+
+#[test]
+fn the_recorded_qualification_for_this_host_is_readable_and_still_failing() {
+    // The file is evidence, so it has to keep parsing and keep saying what it
+    // said. If somebody fixes the credential store, this test is how they find
+    // out the record needs updating.
+    let raw = std::fs::read_to_string("eval/results/write-sandbox-2026-09-28.json")
+        .expect("the qualification record is present");
+    let recorded: serde_json::Value = serde_json::from_str(&raw).expect("it parses");
+    assert_eq!(recorded["verdict"], "NOT PASSED");
+
+    let findings = recorded["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), Check::all().len(), "one entry per check");
+
+    let credentials = findings
+        .iter()
+        .find(|f| f["check"] == "read_credentials")
+        .unwrap();
+    assert_eq!(credentials["observed"], "ALLOWED");
+    assert!(
+        credentials["evidence"]
+            .as_str()
+            .unwrap()
+            .contains("auth.json"),
+        "the evidence names what was read"
+    );
+}

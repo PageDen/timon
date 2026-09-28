@@ -42,13 +42,33 @@ so, but a request asking for something the assigned model cannot do is not
 refused, because that needs a capability model per model. Guessing would be worse
 than the gap.
 
+## Blocking
+
+**The write-sandbox gate has not passed**, so P4.2's writing workers are not
+enabled. One check fails and four have not been probed. See
+`eval/results/write-sandbox-2026-09-28.json`.
+
+Three of the unprobed four need work to probe honestly: moving refs and running
+hooks need a scratch repository with a hook installed, and leaving processes
+behind needs a probe that survives its parent. The fourth, reading another
+account, cannot be probed on this host at all — there is only one account, and a
+check that cannot fail is not a check.
+
 ## Operational
 
-**The broker runs as `workbench`, and so does development.** The store is owned
-by that login, so the developing account can read pooled credentials. The systemd
-unit bounds the blast radius — its own `User=`, the store the only writable path —
-but it does not change who can read. Needs its own service account before a
-second person uses the host. Open question 2 in the plan.
+**A worker can read the pooled credential store, and this is now measured.**
+Probed on 2026-09-28 through `codex exec -s workspace-write`, the path a worker
+actually takes: it read `~/.timon-broker/accounts/acct3/auth.json` and returned
+its first bytes. The write sandbox restricts writes and the network; reads are
+wide open, and the store is owned by the same login the worker runs as.
+
+This was an open question and is now a **failed qualification check**, so
+`timon qualify write-sandbox` does not pass and writing workers stay disabled.
+The fix is the one already named — the broker gets its own service account and
+the store stops being readable by the worker's uid. Nothing else in P4.3 can
+compensate for it: network is blocked, so a token cannot be posted out directly,
+but a worker can write it into its own worktree, which becomes a branch somebody
+reviews, or simply say it in an answer.
 
 **No per-user fairness limits.** `TasksMax`, `LimitNOFILE` and `MemoryMax` cap the
 process as a whole, so one runaway script can still occupy every slot for

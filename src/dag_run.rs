@@ -107,6 +107,13 @@ pub struct Bounds {
     pub concurrency: usize,
     /// Unix seconds after which no further task is started.
     pub deadline: Option<i64>,
+    /// Whether this host has qualified its write sandbox.
+    ///
+    /// Not advisory. The plan says the sandbox is qualified *before* any worker
+    /// writes, and a flag somebody can forget to check is not a gate — so the
+    /// scheduler asks here, every time, rather than trusting that whoever built
+    /// the plan remembered.
+    pub writing_permitted: bool,
 }
 
 impl Default for Bounds {
@@ -114,6 +121,8 @@ impl Default for Bounds {
         Bounds {
             concurrency: 3,
             deadline: None,
+            // Shut by default. A host that has not qualified has not qualified.
+            writing_permitted: false,
         }
     }
 }
@@ -200,6 +209,25 @@ pub fn run_graph<R: Runner + Sync>(
                     TaskReport {
                         label: task.label.clone(),
                         outcome: Outcome::Skipped,
+                        input: None,
+                        started_at: None,
+                        ended_at: None,
+                    },
+                );
+                continue;
+            }
+
+            if task.access == crate::dag::Access::Write && !bounds.writing_permitted {
+                reports.insert(
+                    task.label.clone(),
+                    TaskReport {
+                        label: task.label.clone(),
+                        outcome: Outcome::Failed {
+                            detail: "this host has not qualified its write sandbox, so \
+tasks that change code are not run. `timon qualify write-sandbox` says what is \
+outstanding"
+                                .to_string(),
+                        },
                         input: None,
                         started_at: None,
                         ended_at: None,

@@ -131,6 +131,7 @@ fn independent_tasks_run_at_once_up_to_the_limit() {
     let bounds = Bounds {
         concurrency: 2,
         deadline: None,
+        writing_permitted: false,
     };
     let report = run_graph(&plan, &runner, &bounds, Arc::new(AtomicBool::new(false)));
 
@@ -248,6 +249,7 @@ fn the_deadline_stops_new_work_rather_than_starting_work_to_kill_it() {
     let bounds = Bounds {
         concurrency: 2,
         deadline: Some(1_789_999_999), // already passed
+        writing_permitted: false,
     };
     let report = run_graph(&plan, &runner, &bounds, Arc::new(AtomicBool::new(false)));
 
@@ -283,7 +285,13 @@ fn a_writing_task_whose_dependencies_conflict_fails_with_the_hosts_reason() {
     let report = run_graph(
         &plan,
         &runner,
-        &Bounds::default(),
+        &Bounds {
+            concurrency: 3,
+            deadline: None,
+            // Qualified, so this test reaches input preparation rather than
+            // stopping at the gate.
+            writing_permitted: true,
+        },
         Arc::new(AtomicBool::new(false)),
     );
 
@@ -340,4 +348,73 @@ fn a_dependants_input_carries_what_its_dependency_actually_produced() {
         }
         other => panic!("expected artifacts, got {other:?}"),
     }
+}
+
+#[test]
+fn a_writing_task_does_not_run_on_a_host_that_has_not_qualified() {
+    // P4.3 gates P4.2. The scheduler asks every time rather than trusting that
+    // whoever built the plan remembered — a flag somebody can forget to check
+    // is not a gate.
+    let mut writer = task("edit", &[]);
+    writer.access = Access::Write;
+    let plan = graph(vec![writer, task("read", &[])]);
+    let runner = Scripted::new();
+
+    let report = run_graph(
+        &plan,
+        &runner,
+        &Bounds::default(), // writing_permitted defaults to false
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    let edit = report.tasks.iter().find(|t| t.label == "edit").unwrap();
+    match &edit.outcome {
+        Outcome::Failed { detail } => {
+            assert!(detail.contains("has not qualified"), "{detail}");
+            assert!(detail.contains("timon qualify write-sandbox"), "{detail}");
+        }
+        other => panic!("a writing task must not run unqualified, got {other:?}"),
+    }
+    assert!(
+        !runner.seen.lock().unwrap().contains(&"edit".to_string()),
+        "and it must not have been started at all"
+    );
+
+    // Reading work is unaffected: the gate is about writing.
+    assert!(
+        report
+            .tasks
+            .iter()
+            .find(|t| t.label == "read")
+            .unwrap()
+            .outcome
+            .finished()
+    );
+}
+
+#[test]
+fn a_qualified_host_runs_writing_tasks() {
+    let mut writer = task("edit", &[]);
+    writer.access = Access::Write;
+    let plan = graph(vec![writer]);
+    let runner = Scripted::new();
+
+    let report = run_graph(
+        &plan,
+        &runner,
+        &Bounds {
+            concurrency: 1,
+            deadline: None,
+            writing_permitted: true,
+        },
+        Arc::new(AtomicBool::new(false)),
+    );
+    // A writing task with no dependencies needs no prepared commit, so on a
+    // qualified host it simply runs.
+    assert!(
+        report.tasks[0].outcome.finished(),
+        "got {:?}",
+        report.tasks[0].outcome
+    );
+    assert!(runner.seen.lock().unwrap().contains(&"edit".to_string()));
 }

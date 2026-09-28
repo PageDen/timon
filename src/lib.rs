@@ -12,6 +12,7 @@ pub mod dag_inputs;
 pub mod dag_run;
 pub mod mcp;
 pub mod orchestrate;
+pub mod qualify;
 pub mod recorder;
 pub mod research;
 pub mod result;
