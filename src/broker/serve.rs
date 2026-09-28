@@ -427,20 +427,13 @@ fn handle(config: &Config, counters: &Counters, stream: TcpStream) -> std::io::R
         }
     };
 
-    // `uid` is what a later slice records alongside the usage; nothing is written
-    // here, because this slice does not record.
-    let _ = uid;
-
     let model = select::model_of(&request.body);
     let thread = select::thread_of(&request.headers);
+    // The uid is not only for the record. It is half of the affinity key, because
+    // a thread id arrives in a header and a header is whatever the caller says.
+    let caller = thread.as_deref().map(|thread| (uid, thread));
 
-    match attempt(
-        config,
-        counters,
-        &request,
-        model.as_deref(),
-        thread.as_deref(),
-    ) {
+    match attempt(config, counters, &request, model.as_deref(), caller) {
         Ok(served) => {
             counters
                 .bytes_to_upstream
@@ -455,7 +448,7 @@ fn handle(config: &Config, counters: &Counters, stream: TcpStream) -> std::io::R
             if let Some(thread) = thread.as_deref()
                 && let Ok(mut pool) = config.pool.lock()
             {
-                pool.bind(thread, &served.account, now());
+                pool.bind(uid, thread, &served.account, now());
             }
             writer.write_all(&served.head)?;
             writer.flush()?;
@@ -504,7 +497,7 @@ fn attempt(
     counters: &Counters,
     request: &Request,
     model: Option<&str>,
-    thread: Option<&str>,
+    caller: Option<(u32, &str)>,
 ) -> Result<Served, Refused> {
     let candidates = usable_names(config);
     let mut excluded: Vec<String> = Vec::new();
@@ -517,7 +510,7 @@ fn attempt(
                 reason: "Internal Server Error",
                 detail: "the broker's account state is poisoned; restart it".to_string(),
             })?;
-            match pool.choose(&candidates, model, thread, &excluded, now()) {
+            match pool.choose(&candidates, model, caller, &excluded, now()) {
                 Ok(name) => name,
                 Err(why) => {
                     return Err(Refused {
