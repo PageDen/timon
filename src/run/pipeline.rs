@@ -78,9 +78,10 @@ pub struct PipelineReport {
     pub graph: GraphReport,
     /// The branch to review, when integration got that far.
     pub result_branch: Option<String>,
-    /// Said plainly, because a clean exit is not approval.
-    pub verified: bool,
-    pub caveat: &'static str,
+    /// What the verifier made of it, when one ran.
+    pub verdict: Option<crate::verify::Verdict>,
+    /// Said plainly when nothing judged the result.
+    pub caveat: Option<&'static str>,
 }
 
 /// What a planner route needs from the host.
@@ -215,9 +216,30 @@ pub fn carry_out<R: Runner + Sync>(
         notes: graph.notes.clone(),
         graph: report,
         result_branch,
-        verified: false,
-        caveat: "Nothing here judged the result. The branch is a merge of what the \
-                 workers produced, not a recommendation: the verifier that would \
-                 decide whether it is worth offering is P5 and is not built.",
+        verdict: None,
+        caveat: Some(NOT_JUDGED),
     }
+}
+
+/// Said when nothing judged a result, so a clean exit is not read as approval.
+pub const NOT_JUDGED: &str = "Nothing judged this result. The branch is a merge of what the workers produced, not a recommendation.";
+
+/// Judges a finished run and attaches the verdict.
+///
+/// Separate from carrying it out, because the two fail for different reasons and
+/// a verifier that cannot run should not make a completed run look failed.
+pub fn judge<C: crate::verify::Checks>(
+    report: &mut PipelineReport,
+    tested: Option<String>,
+    criteria: Vec<String>,
+    checks: &C,
+) {
+    let subject = crate::verify::Subject {
+        execution: &report.graph,
+        branch: report.result_branch.as_deref(),
+        tested,
+        criteria,
+    };
+    report.verdict = Some(crate::verify::verify(&subject, checks));
+    report.caveat = None;
 }

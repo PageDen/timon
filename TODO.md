@@ -31,9 +31,19 @@ a way to build a commit from the index plus untracked paths without disturbing
 the working tree — `git stash create` will not do it, and nothing else obvious
 will either.
 
-**Results are not reviewed.** `integrate` produces a branch; P5's verifier is
-what decides whether it should be offered, and it is not written. Until then a
-result branch is a merge, not a recommendation.
+**Task acceptance is never established.** The verifier checks execution, merge
+and the project's own tests, and reports task acceptance as *not established* on
+every run — because deciding whether prose criteria were met is judgement, and
+nothing here does judgement. Two things would change it: a planner that writes
+mechanically checkable criteria, and somewhere to put them. Until then every
+verdict carries "nobody checked that this did what was asked", which is true and
+is the point.
+
+**A project declares its checks or gets none.** `git config timon.checks` is how
+a repository says what to run. Guessing a build command from a filename would
+mean executing arbitrary commands in somebody's checkout on the strength of a
+convention, so an undeclared project gets *not applicable* rather than a
+silent pass.
 
 ## Known limits, accepted for now
 

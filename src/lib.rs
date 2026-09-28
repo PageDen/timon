@@ -19,5 +19,6 @@ pub mod result;
 pub mod run;
 pub mod triage;
 pub mod usage;
+pub mod verify;
 pub mod worker;
 pub mod worktree;

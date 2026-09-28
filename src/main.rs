@@ -1378,7 +1378,16 @@ fn run_execute(
             now,
         ));
         return match report {
-            Ok(report) => {
+            Ok(mut report) => {
+                // The project's own checks, run against the result branch. A
+                // repository that declares none gets `NotApplicable` rather
+                // than a silent pass.
+                let checks = timon::verify::ProjectChecks::for_repository(
+                    run.workspace.as_deref(),
+                    report.result_branch.as_deref(),
+                );
+                let tested = report.result_branch.clone();
+                timon::run::pipeline::judge(&mut report, tested, Vec::new(), &checks);
                 match args.format {
                     ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
                     _ => {
@@ -1392,7 +1401,13 @@ fn run_execute(
                         if !report.graph.not_run.is_empty() {
                             println!("  not run     {}", report.graph.not_run.join(", "));
                         }
-                        println!("\n{}", report.caveat);
+                        match (&report.verdict, report.caveat) {
+                            (Some(verdict), _) => {
+                                println!("\n{}", verdict.render());
+                            }
+                            (None, Some(caveat)) => println!("\n{caveat}"),
+                            (None, None) => {}
+                        }
                     }
                 }
                 Ok(if report.graph.complete { 0 } else { 1 })
