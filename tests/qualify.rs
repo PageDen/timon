@@ -121,28 +121,72 @@ fn every_check_says_why_it_is_a_check() {
 }
 
 #[test]
-fn the_recorded_qualification_for_this_host_is_readable_and_still_failing() {
-    // The file is evidence, so it has to keep parsing and keep saying what it
-    // said. If somebody fixes the credential store, this test is how they find
-    // out the record needs updating.
+fn the_recorded_qualification_keeps_both_runs_and_still_withholds_the_gate() {
+    // The record is evidence, so it has to keep parsing and keep saying what it
+    // said. An earlier version of this test asserted the credential check was
+    // failing; it fired the moment the store was fixed, which is what it was
+    // for. Both runs are kept: the first is why the store moved, and deleting
+    // it would leave the fix looking unmotivated.
     let raw = std::fs::read_to_string("eval/results/write-sandbox-2026-09-28.json")
         .expect("the qualification record is present");
     let recorded: serde_json::Value = serde_json::from_str(&raw).expect("it parses");
-    assert_eq!(recorded["verdict"], "NOT PASSED");
 
-    let findings = recorded["findings"].as_array().unwrap();
-    assert_eq!(findings.len(), Check::all().len(), "one entry per check");
+    let runs = recorded["runs"].as_array().expect("runs");
+    assert_eq!(runs.len(), 2, "the failing run is kept, not overwritten");
 
-    let credentials = findings
+    let first = &runs[0];
+    let credentials = first["findings"]
+        .as_array()
+        .unwrap()
         .iter()
         .find(|f| f["check"] == "read_credentials")
         .unwrap();
-    assert_eq!(credentials["observed"], "ALLOWED");
+    assert_eq!(
+        credentials["observed"], "ALLOWED",
+        "the first run is the reason the store moved"
+    );
+
+    let latest = &runs[1];
+    let credentials = latest["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["check"] == "read_credentials")
+        .unwrap();
+    assert_eq!(credentials["observed"], "blocked");
     assert!(
-        credentials["evidence"]
+        credentials["evidence"].as_str().unwrap().contains("0700"),
+        "the evidence says what makes it blocked, not just that it was"
+    );
+
+    // Still not passed, and for the honest reason: four checks are unprobed.
+    assert!(
+        latest["verdict"]
             .as_str()
             .unwrap()
-            .contains("auth.json"),
-        "the evidence names what was read"
+            .starts_with("NOT PASSED"),
+        "an unrun check keeps the gate shut exactly as a failure does"
+    );
+    let unprobed = latest["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["observed"] == "not_run")
+        .count();
+    assert_eq!(unprobed, 4);
+
+    assert_eq!(
+        latest["findings"].as_array().unwrap().len(),
+        Check::all().len(),
+        "one entry per check, so nothing is quietly dropped"
+    );
+
+    // The limit is stated rather than left for somebody to discover.
+    assert!(
+        recorded["runs"][1]["what_this_does_not_cover"]
+            .as_str()
+            .unwrap()
+            .contains("own logins"),
+        "a worker still reads the developer's own credentials, and the record says so"
     );
 }
