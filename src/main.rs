@@ -79,6 +79,8 @@ enum Command {
     /// Inspect and cancel hand-offs.
     #[command(subcommand)]
     Runs(RunsCommand),
+    /// Show how a goal would be routed, without recording or running anything.
+    Triage(TriageArgs),
 }
 
 /// Where the run store lives by default.
@@ -126,6 +128,21 @@ struct HandoffArgs {
     /// itself is P2 onwards; this is what P1 delivers.
     #[arg(long, default_value_t = true)]
     preflight_only: bool,
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    format: ReportFormat,
+}
+
+#[derive(Args)]
+struct TriageArgs {
+    /// The goal to route.
+    #[arg(long)]
+    goal: String,
+    /// Allow the planner path.
+    #[arg(long)]
+    allow_planner: bool,
+    /// Insist on a route, to see it recorded as the caller's choice.
+    #[arg(long, value_parser = ["cheap", "strong", "planner"])]
+    route: Option<String>,
     #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
     format: ReportFormat,
 }
@@ -788,6 +805,7 @@ fn run() -> Result<u8> {
         Command::Orchestrate(args) => return orchestrate_run(args),
         Command::Run(args) => return run_start(args),
         Command::Handoff(args) => return handoff_serve(args),
+        Command::Triage(args) => return triage_show(args),
         Command::Runs(RunsCommand::List(args)) => return runs_list(args),
         Command::Runs(RunsCommand::Show(args)) => return runs_show(args),
         Command::Runs(RunsCommand::Cancel(args)) => return runs_cancel(args),
@@ -1208,6 +1226,35 @@ fn run_start(args: HandoffArgs) -> Result<u8> {
 fn nix_uid() -> u32 {
     // SAFETY: `getuid` cannot fail and touches no memory the caller owns.
     unsafe { libc::getuid() }
+}
+
+/// Shows how a goal would be routed.
+///
+/// Exists so the routing instrument can ask the shipped binary rather than
+/// reimplement the rules. An instrument that carries its own copy of what it
+/// measures is measuring the copy.
+fn triage_show(args: TriageArgs) -> Result<u8> {
+    let decision = timon::triage::decide(
+        &args.goal,
+        &timon::triage::Allowances {
+            route: args.route.as_deref().and_then(timon::triage::Route::parse),
+            allow_planner: args.allow_planner,
+        },
+    );
+    match args.format {
+        ReportFormat::Csv => {
+            eprintln!("csv is for usage exports; a decision is reported as text or json");
+            return Ok(2);
+        }
+        ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&decision)?),
+        ReportFormat::Text => {
+            println!("{}", decision.summary());
+            for reason in &decision.reasons {
+                println!("  · {} ({})", reason.detail, reason.rule);
+            }
+        }
+    }
+    Ok(0)
 }
 
 /// Serves the hand-off tool for one developer's Codex session.
