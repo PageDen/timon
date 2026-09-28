@@ -1,0 +1,88 @@
+{
+  "registered": "2026-09-28",
+  "purpose": "Measures routing, before the routes are executed. Written while triage could still be changed, and deliberately including cases the current rules are expected to get wrong: a suite that only confirms is not a measurement.",
+  "unit": "One worker session, which may take several model and tool turns inside it. Not one provider request.",
+  "note": "expected_route is what a careful person would choose knowing the work. It is not a description of what the rules do. Where they disagree, the disagreement is the finding.",
+  "tasks": [
+    {
+      "id": "t1",
+      "kind": "simple",
+      "goal": "Summarise the changelog for the last release.",
+      "allow_planner": true,
+      "expected_route": "cheap_worker",
+      "why": "One short deliverable, no tools beyond reading."
+    },
+    {
+      "id": "t2",
+      "kind": "simple",
+      "goal": "List the public functions in the broker module.",
+      "allow_planner": true,
+      "expected_route": "cheap_worker",
+      "why": "Extraction. A cheap call does this as well as a strong one."
+    },
+    {
+      "id": "t3",
+      "kind": "needs-tools",
+      "goal": "Fix the failing test in the recorder.",
+      "allow_planner": true,
+      "expected_route": "strong_worker",
+      "why": "Needs to run tests and change code; one piece of work, so no planner."
+    },
+    {
+      "id": "t4",
+      "kind": "short-but-hard",
+      "goal": "Migrate the schema to v3.",
+      "allow_planner": true,
+      "expected_route": "strong_worker",
+      "why": "Twenty-five characters and genuinely hard. The case that proves length is not difficulty."
+    },
+    {
+      "id": "t5",
+      "kind": "decomposable",
+      "goal": "Summarise the changelog; then draft release notes from it",
+      "allow_planner": true,
+      "expected_route": "planner",
+      "why": "Two deliverables, and the second consumes the first. Planner territory."
+    },
+    {
+      "id": "t6",
+      "kind": "decomposable",
+      "goal": "Write the retention docs\n- cover the 180-day default\n- cover the rebuild-and-swap\n- cover what conservation checks",
+      "allow_planner": true,
+      "expected_route": "planner",
+      "why": "Three independent sections, genuinely parallel."
+    },
+    {
+      "id": "t7",
+      "kind": "coupled",
+      "goal": "Rename the Account type to PooledAccount; then update every call site",
+      "allow_planner": true,
+      "expected_route": "strong_worker",
+      "why": "Reads as two steps and is one edit. Splitting it makes two workers fight over the same files. This is the case where parallelising should actively hurt, and the current rules are expected to send it to the planner."
+    },
+    {
+      "id": "t8",
+      "kind": "planner-not-allowed",
+      "goal": "Summarise the changelog; then draft release notes from it",
+      "allow_planner": false,
+      "expected_route": "strong_worker",
+      "why": "Same goal as t5. Without permission the most that may happen is one strong call."
+    },
+    {
+      "id": "t9",
+      "kind": "long-but-simple",
+      "goal": "Extract every configuration key mentioned anywhere in the runbook, including the ones inside fenced code blocks and the ones only referenced in prose, and return them as a flat list of strings with no commentary, no grouping, no explanation of what each key does, and no attempt to judge whether any of them is still current.",
+      "allow_planner": true,
+      "expected_route": "cheap_worker",
+      "why": "Long and utterly mechanical. The case that proves length is weak evidence in the other direction, and the current rules are expected to send it to a strong call."
+    },
+    {
+      "id": "t10",
+      "kind": "needs-tools",
+      "goal": "Benchmark the relay loop and report the throughput.",
+      "allow_planner": true,
+      "expected_route": "strong_worker",
+      "why": "Has to run the project."
+    }
+  ]
+}

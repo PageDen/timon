@@ -149,9 +149,11 @@ pub const FAST_PATH_MAX_CHARS: usize = 280;
 /// Deliberately about *capability*, not difficulty. Each of these describes
 /// something a single cheap read-only call cannot do, so matching one is a fact
 /// about the request rather than a guess about how hard it is.
-const NEEDS_TOOLS: [(&str, &str); 10] = [
+const NEEDS_TOOLS: [(&str, &str); 12] = [
     ("refactor", "changing code across files"),
     ("migrate", "changing code across files"),
+    ("rename", "changing code across files"),
+    ("call site", "changing code across files"),
     ("implement", "writing code"),
     ("rewrite", "writing code"),
     ("fix the test", "running tests"),
@@ -179,6 +181,30 @@ pub fn decide(goal: &str, allowances: &Allowances) -> Decision {
         ));
         return Decision {
             route,
+            reasons,
+            signals,
+        };
+    }
+
+    // Work that changes code is not parallelised, however many deliverables it
+    // names. Each writing worker gets its own worktree (P4.2), so two workers
+    // editing the same symbol produce a guaranteed merge conflict, which the
+    // verifier then reports as a finding — the split has cost a lead call and
+    // two workers to arrive back where one worker started.
+    //
+    // This is the "tightly coupled work where parallelising should hurt" case,
+    // and the routing suite caught it going the wrong way.
+    if signals.deliverables > 1 && !signals.needs_tools.is_empty() {
+        reasons.push(Reason::new(
+            "coupled_code_change",
+            format!(
+                "the goal names {} steps but they are one code change; separate \
+                 workers would edit the same files and conflict",
+                signals.deliverables
+            ),
+        ));
+        return Decision {
+            route: Route::StrongWorker,
             reasons,
             signals,
         };

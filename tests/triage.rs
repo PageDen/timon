@@ -224,3 +224,52 @@ fn overlapping_separators_do_not_inflate_the_deliverable_count() {
         "a list is what several deliverables usually looks like"
     );
 }
+
+#[test]
+fn coupled_code_changes_are_not_split_across_workers() {
+    // Caught by the routing suite: "rename the type; then update every call
+    // site" reads as two steps and is one edit. Each writing worker gets its own
+    // worktree, so splitting it guarantees a merge conflict — a lead call and
+    // two workers to arrive back where one worker started.
+    let decision = decide(
+        "Rename the Account type to PooledAccount; then update every call site",
+        &open(),
+    );
+    assert_eq!(decision.route, Route::StrongWorker);
+    assert!(fired(&decision, "coupled_code_change"));
+
+    // Work that does not touch code still splits: the conflict argument does
+    // not apply to it.
+    let decision = decide("Summarise the changelog; then draft release notes", &open());
+    assert_eq!(decision.route, Route::Planner);
+}
+
+#[test]
+fn the_routing_fixtures_are_well_formed() {
+    // A suite that cannot be read is not a measurement. Checked here so a
+    // malformed fixture fails in CI rather than halfway through an evaluation.
+    let raw = std::fs::read_to_string("eval/triage-suite.json").expect("suite is present");
+    let suite: serde_json::Value = serde_json::from_str(&raw).expect("suite is JSON");
+    let tasks = suite["tasks"].as_array().expect("tasks is an array");
+    assert!(tasks.len() >= 10, "a suite this small proves little");
+
+    let mut kinds = std::collections::HashSet::new();
+    for task in tasks {
+        for field in ["id", "kind", "goal", "expected_route", "why"] {
+            assert!(
+                task[field].as_str().is_some_and(|v| !v.is_empty()),
+                "task {task:?} is missing {field}"
+            );
+        }
+        assert!(
+            Route::parse(task["expected_route"].as_str().unwrap()).is_some(),
+            "unknown expected_route in {task:?}"
+        );
+        kinds.insert(task["kind"].as_str().unwrap().to_string());
+    }
+
+    // The three shapes Codex's review asked the suite to cover.
+    for required in ["simple", "decomposable", "coupled"] {
+        assert!(kinds.contains(required), "the suite has no {required} case");
+    }
+}
