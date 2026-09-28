@@ -2,8 +2,12 @@
 //!
 //! Accounts are not interchangeable — one account in the pilot pool advertised a
 //! model in its catalog and was then refused that model — and a conversation
-//! cannot be moved between them once it has started. These tests pin both, plus
-//! the quota reading the choice is ranked on.
+//! prefers to stay where its prompt cache is. These tests pin both, plus the
+//! quota reading the choice is ranked on.
+//!
+//! Affinity is a preference and not a rule: a conversation *can* be moved. That
+//! was tested against the real provider, and `tests/rotation_live.rs` covers a
+//! bound account being abandoned when it cannot serve the request.
 
 use serde_json::json;
 use timon::broker::quota::{self, Standing};
@@ -95,7 +99,7 @@ fn a_thread_stays_on_the_account_that_started_it_even_when_another_has_more_room
         .unwrap();
     assert_eq!(
         chosen, "acct2",
-        "continuity must beat headroom: the provider holds state against the thread"
+        "continuity beats headroom: that account holds the warm prompt cache"
     );
 }
 

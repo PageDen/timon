@@ -3,11 +3,21 @@
 //!
 //! Three things decide it, in this order.
 //!
-//! *Continuity.* A conversation that started on one account stays there. The
-//! provider holds server-side state against a thread, so moving a thread between
-//! accounts mid-conversation is not load balancing, it is losing the thread.
-//! Affinity is keyed on the `thread-id` header, which Codex sends on every turn
-//! and which was confirmed present against a live client.
+//! *Continuity.* A conversation that started on one account stays there.
+//!
+//! Not because it must. That was the original reason given here and it was
+//! wrong: testing showed a conversation started on one account resumes correctly
+//! on another, because the client sends `store: false` with no
+//! `previous_response_id` and replays the whole conversation as `input` on every
+//! turn. The provider holds no state against a thread, so nothing is lost by
+//! moving one.
+//!
+//! What is lost is the prompt cache. Each request carries a `prompt_cache_key`,
+//! and a cache is not plausibly shared between two subscriptions, so changing
+//! account mid-conversation turns a cache hit into a full re-read of a
+//! conversation that grows with every turn. Affinity is therefore a cost
+//! preference, not a correctness rule — which is why a bound account that is
+//! exhausted or cannot serve the model is abandoned without ceremony.
 //!
 //! The thread id alone is not the key. It arrives in a header, so it is whatever
 //! the caller says it is; two callers sending the same value would otherwise
@@ -176,8 +186,9 @@ impl Pool {
                 .unwrap_or(true)
         };
 
-        // Continuity first: an account that is already carrying this caller's
-        // thread wins even when another has more headroom.
+        // Continuity first: an account already carrying this caller's thread wins
+        // even when another has more headroom, because it is the one holding the
+        // warm prompt cache for it.
         if let Some((uid, thread)) = caller
             && let Some(bound) = self.bound(uid, thread, now).map(str::to_string)
             && candidates.contains(&bound)
