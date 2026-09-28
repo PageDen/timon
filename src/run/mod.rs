@@ -21,5 +21,6 @@
 //! began from and whether a snapshot was taken, rather than leaving a reader to
 //! guess what "the base" meant.
 
+pub mod execute;
 pub mod record;
 pub mod start;
