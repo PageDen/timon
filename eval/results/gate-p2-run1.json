@@ -139,8 +139,8 @@
   "direct": {
    "tokens": 4321,
    "secs": 10.6,
-   "answer": "Planner",
-   "accepted": false
+   "answer": "CheapWorker\n\nStrongWorker\n\nPlanner",
+   "accepted": true
   }
  },
  {
@@ -149,14 +149,14 @@
   "timon": {
    "tokens": 16343,
    "secs": 8.1,
-   "answer": "Planner",
-   "accepted": false
+   "answer": "CheapWorker\n\nStrongWorker\n\nPlanner",
+   "accepted": true
   },
   "direct": {
    "tokens": 13478,
    "secs": 12.7,
-   "answer": "Planner",
-   "accepted": false
+   "answer": "CheapWorker  \nStrongWorker  \nPlanner",
+   "accepted": true
   }
  }
 ]

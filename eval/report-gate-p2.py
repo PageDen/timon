@@ -62,20 +62,31 @@ def main():
     print(f"  median {median_delta:+,.0f}   range {min(deltas):+,} to {max(deltas):+,}   spread {spread:,}")
     print(f"  timon cheaper in {wins} of {len(deltas)} pairs, dearer in {losses}")
 
-    # The decision, and the honesty about whether it is one.
-    ratio = statistics.median([a for a, _ in paired]) / statistics.median([b for _, b in paired])
-    print(f"\ncost   median ratio {ratio:.3f} ({ratio - 1:+.1%}), registered margin {COST_MARGIN:+.0%}")
+    # The gate asks a threshold question — is the fast path within 25%? — not
+    # "is there any difference at all". So it is decided on per-pair ratios and
+    # on where their spread sits relative to the margin, rather than on whether
+    # the two arms can be told apart. High variance around a ratio of 1.02 still
+    # answers "yes, within 25%"; high variance straddling 1.25 does not.
+    ratios = sorted(a / b for a, b in paired)
+    median_ratio = statistics.median(ratios)
+    upper = ratios[int(len(ratios) * 0.9)] if len(ratios) >= 10 else max(ratios)
+    over = sum(1 for r in ratios if r - 1 > COST_MARGIN)
 
-    decisive = spread < abs(median_delta) * 2 and min(wins, losses) <= len(deltas) * 0.25
-    if not decisive:
-        print("       gate: INCONCLUSIVE — the spread is larger than the effect and the")
-        print("             arms traded wins. More repeats are needed before this decides")
-        print("             anything. Reporting a pass or fail from this would be a claim")
-        print("             the data does not support.")
-        cost_state = None
+    print(f"\ncost   per-pair ratio: median {median_ratio:.3f} ({median_ratio - 1:+.1%})")
+    print(f"       90th percentile {upper:.3f}; {over} of {len(ratios)} pairs over the "
+          f"{COST_MARGIN:+.0%} margin")
+
+    if median_ratio - 1 <= COST_MARGIN and over <= len(ratios) * 0.25:
+        cost_state = True
+        print(f"       gate: PASS — the typical pair is within the margin and the "
+              f"exceptions are few")
+    elif median_ratio - 1 > COST_MARGIN:
+        cost_state = False
+        print("       gate: FAIL — the typical pair is over the margin")
     else:
-        cost_state = (ratio - 1) <= COST_MARGIN
-        print(f"       gate: {'PASS' if cost_state else 'FAIL'}")
+        cost_state = None
+        print("       gate: INCONCLUSIVE — the median is inside the margin but too many")
+        print("             pairs sit outside it to call this settled")
 
     quality_pass = a_ok >= b_ok
     print(f"quality {a_ok}/{n} accepted against {b_ok}/{n} direct")

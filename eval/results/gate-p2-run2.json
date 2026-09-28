@@ -1,0 +1,427 @@
+[
+ {
+  "task": "g1",
+  "rep": 0,
+  "timon_first": false,
+  "timon": {
+   "tokens": 5282,
+   "secs": 12.2,
+   "answer": "300",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 4680,
+   "secs": 12.3,
+   "answer": "300",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g1",
+  "rep": 1,
+  "timon_first": false,
+  "timon": {
+   "tokens": 3218,
+   "secs": 15.1,
+   "answer": "300",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 5310,
+   "secs": 10.1,
+   "answer": "300",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g1",
+  "rep": 2,
+  "timon_first": false,
+  "timon": {
+   "tokens": 12186,
+   "secs": 7.6,
+   "answer": "300",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 3276,
+   "secs": 7.6,
+   "answer": "300",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g1",
+  "rep": 3,
+  "timon_first": false,
+  "timon": {
+   "tokens": 8382,
+   "secs": 7.0,
+   "answer": "300",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 6302,
+   "secs": 9.3,
+   "answer": "300",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g1",
+  "rep": 4,
+  "timon_first": true,
+  "timon": {
+   "tokens": 3220,
+   "secs": 7.2,
+   "answer": "300",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 1188,
+   "secs": 11.7,
+   "answer": "300",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g2",
+  "rep": 0,
+  "timon_first": false,
+  "timon": {
+   "tokens": 1105,
+   "secs": 8.3,
+   "answer": "src/broker/grant.rs",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 5915,
+   "secs": 10.0,
+   "answer": "src/broker/grant.rs",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g2",
+  "rep": 1,
+  "timon_first": false,
+  "timon": {
+   "tokens": 3113,
+   "secs": 9.7,
+   "answer": "src/broker/grant.rs",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 1122,
+   "secs": 7.5,
+   "answer": "src/broker/grant.rs",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g2",
+  "rep": 2,
+  "timon_first": false,
+  "timon": {
+   "tokens": 6181,
+   "secs": 6.8,
+   "answer": "src/broker/grant.rs",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 1148,
+   "secs": 15.9,
+   "answer": "src/broker/grant.rs",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g2",
+  "rep": 3,
+  "timon_first": false,
+  "timon": {
+   "tokens": 3174,
+   "secs": 7.4,
+   "answer": "src/broker/grant.rs",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 3145,
+   "secs": 10.2,
+   "answer": "src/broker/grant.rs",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g2",
+  "rep": 4,
+  "timon_first": true,
+  "timon": {
+   "tokens": 3156,
+   "secs": 7.6,
+   "answer": "src/broker/grant.rs",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 3174,
+   "secs": 7.9,
+   "answer": "src/broker/grant.rs",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g3",
+  "rep": 0,
+  "timon_first": false,
+  "timon": {
+   "tokens": 3326,
+   "secs": 7.2,
+   "answer": "280",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 5007,
+   "secs": 11.1,
+   "answer": "280",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g3",
+  "rep": 1,
+  "timon_first": false,
+  "timon": {
+   "tokens": 1324,
+   "secs": 12.6,
+   "answer": "280",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 10270,
+   "secs": 8.6,
+   "answer": "280",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g3",
+  "rep": 2,
+  "timon_first": true,
+  "timon": {
+   "tokens": 1300,
+   "secs": 9.1,
+   "answer": "280",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 1268,
+   "secs": 10.7,
+   "answer": "280",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g3",
+  "rep": 3,
+  "timon_first": true,
+  "timon": {
+   "tokens": 1260,
+   "secs": 8.1,
+   "answer": "280",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 3350,
+   "secs": 11.2,
+   "answer": "280",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g3",
+  "rep": 4,
+  "timon_first": false,
+  "timon": {
+   "tokens": 3318,
+   "secs": 7.6,
+   "answer": "280",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 2937,
+   "secs": 6.4,
+   "answer": "280",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g4",
+  "rep": 0,
+  "timon_first": true,
+  "timon": {
+   "tokens": 1113,
+   "secs": 10.7,
+   "answer": "11",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 2926,
+   "secs": 10.8,
+   "answer": "11",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g4",
+  "rep": 1,
+  "timon_first": false,
+  "timon": {
+   "tokens": 3126,
+   "secs": 9.0,
+   "answer": "11",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 2769,
+   "secs": 12.1,
+   "answer": "11",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g4",
+  "rep": 2,
+  "timon_first": false,
+  "timon": {
+   "tokens": 6240,
+   "secs": 10.9,
+   "answer": "11",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 3153,
+   "secs": 10.1,
+   "answer": "11",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g4",
+  "rep": 3,
+  "timon_first": false,
+  "timon": {
+   "tokens": 1106,
+   "secs": 9.6,
+   "answer": "11",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 1095,
+   "secs": 8.7,
+   "answer": "11",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g4",
+  "rep": 4,
+  "timon_first": false,
+  "timon": {
+   "tokens": 1096,
+   "secs": 8.5,
+   "answer": "11",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 1136,
+   "secs": 9.6,
+   "answer": "11",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g5",
+  "rep": 0,
+  "timon_first": true,
+  "timon": {
+   "tokens": 7443,
+   "secs": 8.3,
+   "answer": "CheapWorker, StrongWorker, Planner",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 4275,
+   "secs": 10.1,
+   "answer": "CheapWorker\n\nStrongWorker\n\nPlanner",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g5",
+  "rep": 1,
+  "timon_first": true,
+  "timon": {
+   "tokens": 4055,
+   "secs": 6.8,
+   "answer": "CheapWorker  \nStrongWorker  \nPlanner",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 5967,
+   "secs": 8.7,
+   "answer": "CheapWorker, StrongWorker, Planner",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g5",
+  "rep": 2,
+  "timon_first": true,
+  "timon": {
+   "tokens": 4321,
+   "secs": 8.7,
+   "answer": "CheapWorker\n\nStrongWorker\n\nPlanner",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 2221,
+   "secs": 8.6,
+   "answer": "CheapWorker\nStrongWorker\nPlanner",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g5",
+  "rep": 3,
+  "timon_first": true,
+  "timon": {
+   "tokens": 4269,
+   "secs": 12.3,
+   "answer": "CheapWorker\n\nStrongWorker\n\nPlanner",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 2221,
+   "secs": 9.6,
+   "answer": "CheapWorker\n\nStrongWorker\n\nPlanner",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g5",
+  "rep": 4,
+  "timon_first": true,
+  "timon": {
+   "tokens": 3126,
+   "secs": 14.9,
+   "answer": "CheapWorker  \nStrongWorker  \nPlanner",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 2219,
+   "secs": 9.8,
+   "answer": "CheapWorker StrongWorker Planner",
+   "accepted": true
+  }
+ }
+]

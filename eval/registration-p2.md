@@ -152,3 +152,50 @@ percentage is too coarse to attribute anything, so **token counts are the only
 usable cost measure for P2-sized work**, and the quota figure is for capacity
 planning rather than comparison. Recorded here because the plan's budget language
 is written in windows, and windows cannot see work this small.
+
+
+## Run 2 — 2026-09-28 — quality passes, cost is not settled
+
+25 paired calls with randomised arm order and five repeats per task.
+
+| | timon | direct |
+|---|---|---|
+| Tokens, median | 3,218 | 3,145 |
+| Tokens, IQR | 1,312 – 4,802 | 1,744 – 4,844 |
+| Accepted | **25/25** | **25/25** |
+| Latency, median | 8.5s | 10.0s |
+
+**Quality: PASS.** Both arms answered every task correctly.
+
+**Cost: INCONCLUSIVE.** Per-pair ratio has a median of 1.129 (+12.9%), inside the
+registered 25% margin — but 10 of 25 pairs sit outside it, and the paired delta
+ranges from −8,946 to +8,910 tokens. The typical pair is fine; the tail is not
+settled, and a margin test cannot be called passed while two pairs in five exceed
+it.
+
+There is no evidence the fast path is systematically expensive: it was cheaper in
+9 pairs and dearer in 16, and the spread swamps the lean. **No cause for the lean
+is offered, because none was established.**
+
+### What run 1's number was worth
+
+Run 1 reported a median ratio of **1.495**. Run 2, with the ordering confound
+removed, reports **1.129** on the same tasks and the same model. The first number
+was mostly an artefact of always running Timon first into a cold prompt cache.
+Had it been reported as a finding, it would have sent someone looking for a 50%
+overhead that does not exist.
+
+### A third instrument fault, and what it cost
+
+The quality gate first reported **FAIL, 21/25 against 22/25**. Every failure was
+the same task, and the recorded answer was `'Planner'`. The worker had answered
+correctly — *CheapWorker / StrongWorker / Planner*, on three lines — and the
+instrument kept only the last one. An answer is a block, not a line.
+
+Re-scored from saved transcripts: **25/25 on both arms.** No calls were repeated,
+because the transcripts were kept. That is now three instrument faults on this
+gate, two of them found only by looking at what the numbers were made of.
+
+**Standing rule from this:** a gate result is not reported until the failing
+cases have been read individually. A rate hides which case broke, and twice here
+the case that broke was the instrument.

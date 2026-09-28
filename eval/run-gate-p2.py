@@ -51,12 +51,26 @@ def tokens_of(lines):
 
 
 def answer_of(lines):
+    """The model's final reply, whole.
+
+    Taking the last line was wrong and scored a correct three-line answer as a
+    failure: the worker said CheapWorker / StrongWorker / Planner and the
+    instrument recorded "Planner". An answer is a block, not a line.
+    """
+    # The transcript marks the final reply with a bare `codex` line and ends it
+    # at the token report.
+    start = None
     for i, line in enumerate(lines):
-        if line.strip() == "tokens used":
-            for back in range(i - 1, -1, -1):
-                if lines[back].strip():
-                    return lines[back].strip()
-    return next((l.strip() for l in reversed(lines) if l.strip()), None)
+        if line.strip() == "codex":
+            start = i + 1
+    if start is None:
+        return "\n".join(l for l in lines if l.strip()).strip() or None
+    end = len(lines)
+    for i in range(start, len(lines)):
+        if lines[i].strip() == "tokens used":
+            end = i
+            break
+    return "\n".join(lines[start:end]).strip() or None
 
 
 def accepted(answer, criterion):
@@ -87,13 +101,10 @@ def run_timon(task, rep, args):
     secs = time.time() - started
     inner = next((p for p in Path(run_out).iterdir() if p.is_dir()), None) if Path(run_out).is_dir() else None
     lines = lines_of(inner / "stdout.log", inner / "stderr.log") if inner else []
-    # The answer is the worker's clean stdout, not the transcript.
+    # The worker's clean stdout is the answer, whole. Not its last line.
     answer = None
     if inner:
-        answer = next(
-            (l.strip() for l in reversed(lines_of(inner / "stdout.log")) if l.strip()),
-            None,
-        )
+        answer = "\n".join(lines_of(inner / "stdout.log")).strip() or None
     return {"tokens": tokens_of(lines), "secs": round(secs, 1), "answer": answer}
 
 
