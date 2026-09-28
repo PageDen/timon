@@ -9,6 +9,7 @@ pub mod bridge;
 pub mod broker;
 pub mod dag;
 pub mod dag_inputs;
+pub mod dag_run;
 pub mod mcp;
 pub mod orchestrate;
 pub mod recorder;

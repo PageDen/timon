@@ -1278,8 +1278,11 @@ fn run_execute(
         command
     };
 
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     let plan = Plan {
         broker: args.broker.clone(),
+        cancel: std::sync::Arc::clone(&cancel),
         cheap_command: args
             .cheap_command
             .clone()
@@ -1302,6 +1305,18 @@ fn run_execute(
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
+
+    // Ctrl-C stops the worker, not just this process. Without it an interrupted
+    // run leaves a child still spending somebody's quota, which is the failure
+    // TODO.md recorded against P2's executor.
+    let on_signal = std::sync::Arc::clone(&cancel);
+    runtime.spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprintln!("\ntimon: stopping the run and its worker…");
+            on_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+
     let executed = runtime.block_on(execute(runs, run, decision, &plan, now));
 
     match executed {

@@ -29,10 +29,13 @@ only in the safe one; fixing it means guessing at difficulty, which is what send
 the wrong work to the wrong place. Recorded in `eval/registration-p2.md` as a
 standing disagreement rather than reconciled.
 
-**Cancellation does not reach a running worker.** `timon runs cancel` moves the
-record to `cancelling` and revokes the grant, so no *new* request is authorised —
-but the worker's current turn runs to its deadline. Closing this needs a cancel
-signal the executor watches, which is P4's scheduler work.
+**Cancellation from `timon runs cancel` does not yet reach a running worker.**
+Ctrl-C does: the executor watches a flag and kills the worker's process group,
+and the scheduler stops starting new tasks. What is still missing is the path
+from a *separate* `timon runs cancel` invocation to a worker in another process —
+the record moves to `cancelling` and the grant is revoked, so no new request is
+authorised, but the running turn continues. Closing it needs the run to watch its
+own record, or a signal addressed to it.
 
 **Model policy cannot refuse on capability.** P1.3 substitutes the model and says
 so, but a request asking for something the assigned model cannot do is not
