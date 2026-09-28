@@ -343,3 +343,38 @@ fn the_grant_never_reaches_the_provider() {
         "the grant header must be stripped"
     );
 }
+
+#[test]
+fn an_account_scope_refusal_is_not_reported_as_retryable() {
+    // Found running it: a worker read 502 as "try again" and retried five times
+    // against a condition that cannot change for the life of the run. The run is
+    // not permitted those accounts; retrying cannot make it permitted.
+    let root = tempfile::tempdir().unwrap();
+    account(root.path(), "acct3");
+    let (port, _config, _counters) = started(root.path(), vec!["acct3".to_string()]);
+
+    let minted = post(
+        port,
+        "/_timon/grant",
+        r#"{"run_id":"run-scoped","accounts":["acct2"]}"#,
+        None,
+    );
+    let body = minted.split("\r\n\r\n").nth(1).unwrap();
+    let token = serde_json::from_str::<serde_json::Value>(body).unwrap()["grant"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let used = post(
+        port,
+        "/responses",
+        r#"{"model":"gpt-5.6-luna"}"#,
+        Some(&token),
+    );
+    assert!(
+        used.starts_with("HTTP/1.1 403"),
+        "a permanent authority failure must not look retryable: {used}"
+    );
+    assert!(used.contains("run-scoped"), "the refusal names the run");
+    assert!(used.contains("acct2"), "and the accounts it may spend");
+}

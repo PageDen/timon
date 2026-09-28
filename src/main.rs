@@ -124,10 +124,31 @@ struct HandoffArgs {
     /// The run store.
     #[arg(long)]
     store: Option<PathBuf>,
-    /// Record the run and report it, without starting the pipeline. The pipeline
-    /// itself is P2 onwards; this is what P1 delivers.
-    #[arg(long, default_value_t = true)]
-    preflight_only: bool,
+    /// Run the route triage chose. **This spends quota**, which is why it is
+    /// off by default: a command that records a run and one that pays for it
+    /// should not be the same keystroke.
+    #[arg(long)]
+    execute: bool,
+    /// Where the broker listens.
+    #[arg(long, default_value = "127.0.0.1:1456")]
+    broker: String,
+    /// The worker command for the cheap route. The task goes on stdin.
+    #[arg(long, num_args = 1.., value_delimiter = ' ')]
+    cheap_command: Option<Vec<std::ffi::OsString>>,
+    /// The worker command for the strong route.
+    #[arg(long, num_args = 1.., value_delimiter = ' ')]
+    strong_command: Option<Vec<std::ffi::OsString>>,
+    /// The model each route runs on. Sent to the broker in the run's grant.
+    #[arg(long)]
+    cheap_model: Option<String>,
+    #[arg(long)]
+    strong_model: Option<String>,
+    /// Where worker output is written.
+    #[arg(long)]
+    output_root: Option<PathBuf>,
+    /// Seconds a worker may run.
+    #[arg(long, default_value_t = 600)]
+    worker_deadline_secs: u64,
     #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
     format: ReportFormat,
 }
@@ -1140,8 +1161,8 @@ fn render_run(run: &timon::run::record::Run) -> String {
 fn run_start(args: HandoffArgs) -> Result<u8> {
     use timon::run::start::{Request, admit};
 
-    let runs = open_runs(args.store)?;
-    let workspace = match args.workspace {
+    let runs = open_runs(args.store.clone())?;
+    let workspace = match args.workspace.clone() {
         Some(path) => Some(path),
         None => std::env::current_dir().ok(),
     };
@@ -1149,16 +1170,16 @@ fn run_start(args: HandoffArgs) -> Result<u8> {
     let now = now_secs();
 
     let request = Request {
-        goal: args.goal,
+        goal: args.goal.clone(),
         // From the kernel, not from a flag: attribution a caller can set is not
         // attribution.
         principal_uid: nix_uid(),
         workspace,
-        accounts: args.accounts,
+        accounts: args.accounts.clone(),
         max_attempts: args.max_attempts,
         token_ceiling: args.token_ceiling,
         deadline: args.deadline_secs.map(|secs| now + secs),
-        submission_key: args.submission_key,
+        submission_key: args.submission_key.clone(),
     };
 
     let run = match admit(
@@ -1191,6 +1212,10 @@ fn run_start(args: HandoffArgs) -> Result<u8> {
         eprintln!("timon run: the triage decision could not be recorded: {error}");
     }
 
+    if args.execute {
+        return run_execute(&runs, &run, &decision, &args, now);
+    }
+
     match args.format {
         ReportFormat::Csv => {
             eprintln!("csv is for usage exports; a run record is reported as text or json");
@@ -1211,12 +1236,10 @@ fn run_start(args: HandoffArgs) -> Result<u8> {
                  reports it later, and `timon runs cancel {}` stops it.",
                 run.id, run.id
             );
-            if args.preflight_only {
-                println!(
-                    "\nPreflight only. Triage and the pipeline are P2 onwards; nothing \n\
-                     has been sent to a model and no quota has been spent."
-                );
-            }
+            println!(
+                "\nRecorded, not run. Nothing has been sent to a model and no quota \n\
+                 has been spent. Add --execute to run the route above."
+            );
         }
     }
     Ok(0)
@@ -1226,6 +1249,92 @@ fn run_start(args: HandoffArgs) -> Result<u8> {
 fn nix_uid() -> u32 {
     // SAFETY: `getuid` cannot fail and touches no memory the caller owns.
     unsafe { libc::getuid() }
+}
+
+/// Executes the route triage chose.
+///
+/// Separated from recording because the two differ in the only way that
+/// matters: this one spends somebody's quota.
+fn run_execute(
+    runs: &timon::run::record::Runs,
+    run: &timon::run::record::Run,
+    decision: &timon::triage::Decision,
+    args: &HandoffArgs,
+    now: i64,
+) -> Result<u8> {
+    use timon::run::execute::{Plan, execute};
+
+    let default_command = |model: Option<&String>| -> Vec<std::ffi::OsString> {
+        // `codex exec` reading its task from stdin. The task never goes in the
+        // arguments, where every account on the host could read it from a
+        // process listing.
+        let mut command: Vec<std::ffi::OsString> = vec!["codex".into(), "exec".into()];
+        if let Some(model) = model {
+            command.push("-m".into());
+            command.push(model.into());
+        }
+        command.push("--skip-git-repo-check".into());
+        command.push("-".into());
+        command
+    };
+
+    let plan = Plan {
+        broker: args.broker.clone(),
+        cheap_command: args
+            .cheap_command
+            .clone()
+            .unwrap_or_else(|| default_command(args.cheap_model.as_ref())),
+        strong_command: args
+            .strong_command
+            .clone()
+            .unwrap_or_else(|| default_command(args.strong_model.as_ref())),
+        cheap_model: args.cheap_model.clone(),
+        strong_model: args.strong_model.clone(),
+        output_root: args
+            .output_root
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("timon-runs")),
+        deadline: std::time::Duration::from_secs(args.worker_deadline_secs),
+        max_output_bytes: 8 * 1024 * 1024,
+        grant_lifetime_secs: args.worker_deadline_secs as i64 + 60,
+    };
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let executed = runtime.block_on(execute(runs, run, decision, &plan, now));
+
+    match executed {
+        Ok(executed) => {
+            match args.format {
+                ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&executed)?),
+                _ => {
+                    println!("{}  {}", executed.run_id, executed.status.as_str());
+                    println!("  route       {}", executed.route.as_str());
+                    println!("  authority   {}", executed.grant_id);
+                    if let Some(detail) = &executed.detail {
+                        println!("  note        {detail}");
+                    }
+                    if let Some(output) = &executed.output {
+                        println!("\n{}", output.trim_end());
+                    }
+                }
+            }
+            Ok(if executed.detail.is_some() { 1 } else { 0 })
+        }
+        Err(error) => {
+            eprintln!("timon run: {error}");
+            // The run exists and did not finish; saying so is better than
+            // leaving it marked running forever.
+            let _ = runs.settle(
+                &run.id,
+                timon::run::record::Status::Finished,
+                now,
+                Some(&format!("{error}")),
+            );
+            Ok(1)
+        }
+    }
 }
 
 /// Shows how a goal would be routed.

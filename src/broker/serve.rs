@@ -625,12 +625,17 @@ fn attempt(
     {
         candidates.retain(|name| authority.accounts.contains(name));
         if candidates.is_empty() {
+            // 403 rather than 502, and the difference is not cosmetic: a client
+            // reads 502 as "try again" and did, five times, against a condition
+            // that cannot change for this run. The run is not permitted these
+            // accounts; retrying cannot make it permitted.
             return Err(Refused {
-                status: 502,
-                reason: "Bad Gateway",
+                status: 403,
+                reason: "Forbidden",
                 detail: format!(
-                    "run {} is limited to account(s) [{}], and none of them can serve \
-                     requests right now",
+                    "run {} may only spend account(s) [{}], and this broker serves \
+                     none of them. Start the run against a broker that does, or grant \
+                     it an account this one serves.",
                     authority.run_id,
                     authority.accounts.join(", ")
                 ),
