@@ -20,11 +20,28 @@ They are separate and either can fail on its own.
 
 | Gate | Passes when | Does not establish |
 |---|---|---|
-| **Cost** | Fast-path total tokens are within a measured margin of calling the cheap model directly, with triage overhead reported rather than assumed zero | Anything about whether the answers are good |
+| **Cost** | Median fast-path tokens are **no more than 25% above** a direct cheap call on the same task, with triage overhead reported rather than assumed zero | Anything about whether the answers are good |
 | **Quality** | Task acceptance rate on the fast path is not worse than the direct cheap call, on the same fixtures | Anything about cost |
 
 Low overhead on a bad answer is not success. That is why quality is a gate and
 not a footnote.
+
+**Why 25%.** The fast path adds a broker hop and a grant round trip to a call
+that would otherwise go straight to the provider; none of that is model tokens,
+so on token count it should be close to free. The margin is there for the
+difference in how the two arms are prompted, not as room for orchestration
+overhead — the pilot's 1.365x is what this route exists to avoid, so a margin
+anywhere near that would make the gate meaningless. Fixed at 25% on 2026-09-28,
+before the gate was run.
+
+**Ground truth for the gate suite** was read from the repository at commit
+`c6f182e` and recorded in `eval/gate-p2-suite.json`, so a later disagreement is
+settled against the files rather than against anyone's memory.
+
+**The checker is self-tested before each run.** `eval/score-answer.py
+--self-test` covers thirteen cases, and the runner refuses to proceed if any
+fail. It caught its own first version treating "the value is 300." as wrong,
+because a sentence-ending full stop looked like part of a number.
 
 ## Measured
 

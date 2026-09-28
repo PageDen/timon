@@ -1,0 +1,39 @@
+{
+  "registered": "2026-09-28",
+  "gate": "P2",
+  "purpose": "The fast-path gate. Every task is fast-path eligible, answerable by reading this repository, and has an acceptance criterion that is decided by a string check rather than by a judgement.",
+  "why_mechanical": "A model judging a model is another instrument to validate before it can be trusted. These questions were chosen so the answer is a fact this repository already states, which keeps the instrument out of the argument.",
+  "ground_truth_taken": "2026-09-28 at commit c6f182e, by reading the files directly. Recorded so a later disagreement can be settled against the repository rather than against memory.",
+  "tasks": [
+    {
+      "id": "g1",
+      "goal": "In this repository, what is the value of REFRESH_SKEW_SECS in the broker's refresh module? Reply with just the number.",
+      "accept": { "kind": "contains", "value": "300" },
+      "truth": "300"
+    },
+    {
+      "id": "g2",
+      "goal": "In this repository, which file defines the Grants struct? Reply with just the path.",
+      "accept": { "kind": "contains", "value": "src/broker/grant.rs" },
+      "truth": "src/broker/grant.rs"
+    },
+    {
+      "id": "g3",
+      "goal": "In this repository, what is the value of FAST_PATH_MAX_CHARS in the triage module? Reply with just the number.",
+      "accept": { "kind": "contains", "value": "280" },
+      "truth": "280"
+    },
+    {
+      "id": "g4",
+      "goal": "In this repository, how many .rs files are directly inside src/broker? Reply with just the number.",
+      "accept": { "kind": "contains", "value": "11" },
+      "truth": "11"
+    },
+    {
+      "id": "g5",
+      "goal": "In this repository, name the three variants of the Route enum in the triage module. Reply with just the three names.",
+      "accept": { "kind": "all_of", "value": ["CheapWorker", "StrongWorker", "Planner"] },
+      "truth": "CheapWorker, StrongWorker, Planner"
+    }
+  ]
+}
