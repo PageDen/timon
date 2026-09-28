@@ -13,5 +13,6 @@ pub mod recorder;
 pub mod research;
 pub mod result;
 pub mod run;
+pub mod triage;
 pub mod usage;
 pub mod worker;

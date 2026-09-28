@@ -406,6 +406,67 @@ fn read_row(row: &rusqlite::Row<'_>) -> Result<Run, RunError> {
     })
 }
 
+impl Runs {
+    /// Records what triage decided for a run.
+    ///
+    /// Kept in its own table rather than as columns on the run: P3 will make one
+    /// decision per task, and a shape that only fits one decision would have to
+    /// be undone then.
+    ///
+    /// The reasons are the point. Whether a route was the right one is a
+    /// question about the alternative that was not run, and nothing downstream
+    /// can answer it — so the evidence has to be here, or misrouting is not
+    /// measurable at all.
+    pub fn record_triage(
+        &self,
+        run_id: &str,
+        decision: &crate::triage::Decision,
+        now: i64,
+    ) -> Result<(), RunError> {
+        self.conn.execute(
+            "INSERT INTO triage (run_id, task_label, route, reasons, signals, decided_at)
+             VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                run_id,
+                decision.route.as_str(),
+                serde_json::to_string(&decision.reasons)
+                    .map_err(|_| RunError::Malformed("reasons"))?,
+                serde_json::to_string(&decision.signals)
+                    .map_err(|_| RunError::Malformed("signals"))?,
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// What triage decided for a run, newest first.
+    pub fn triage_of(&self, run_id: &str) -> Result<Vec<crate::triage::Decision>, RunError> {
+        let mut statement = self.conn.prepare(
+            "SELECT route, reasons, signals FROM triage WHERE run_id = ?1
+             ORDER BY decided_at DESC",
+        )?;
+        let rows = statement.query_map([run_id], |row| {
+            let route: String = row.get(0)?;
+            let reasons: String = row.get(1)?;
+            let signals: String = row.get(2)?;
+            Ok((route, reasons, signals))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (route, reasons, signals) = row?;
+            out.push(crate::triage::Decision {
+                route: crate::triage::Route::parse(&route)
+                    .ok_or(RunError::Malformed("unknown route"))?,
+                reasons: serde_json::from_str(&reasons)
+                    .map_err(|_| RunError::Malformed("reasons are not JSON"))?,
+                signals: serde_json::from_str(&signals)
+                    .map_err(|_| RunError::Malformed("signals are not JSON"))?,
+            });
+        }
+        Ok(out)
+    }
+}
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS runs (
     id             TEXT PRIMARY KEY,
@@ -429,4 +490,16 @@ CREATE INDEX IF NOT EXISTS runs_started ON runs (started_at DESC);
 -- the same piece of work rather than a second one that spends twice.
 CREATE UNIQUE INDEX IF NOT EXISTS runs_submission_key
     ON runs (submission_key) WHERE submission_key IS NOT NULL;
+
+-- One row per routing decision. `task_label` is null for the run's own
+-- decision and will name a task once P3 routes each one.
+CREATE TABLE IF NOT EXISTS triage (
+    run_id      TEXT NOT NULL,
+    task_label  TEXT,
+    route       TEXT NOT NULL,
+    reasons     TEXT NOT NULL,
+    signals     TEXT NOT NULL,
+    decided_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS triage_run ON triage (run_id);
 ";
