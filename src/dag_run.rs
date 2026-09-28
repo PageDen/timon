@@ -141,6 +141,11 @@ pub trait Runner {
 
     /// Prepares a commit containing the named tasks' changes, for a writing
     /// task. Returns the reason on conflict, which becomes a verifier finding.
+    ///
+    /// The default refuses rather than pretending: a host with no way to
+    /// prepare a commit cannot honestly run a writing task, and a scheduler
+    /// that quietly started one anyway would be running it against the wrong
+    /// tree. `timon::worktree::Workspace` is the implementation that can.
     fn prepare(&self, _merged: &[String]) -> Result<String, String> {
         Err("this host cannot prepare commits, so writing tasks cannot run".to_string())
     }

@@ -20,3 +20,4 @@ pub mod run;
 pub mod triage;
 pub mod usage;
 pub mod worker;
+pub mod worktree;
