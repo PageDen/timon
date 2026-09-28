@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use crate::broker::health;
 use crate::broker::identity::peer_uid;
 use crate::broker::select::{self, NoAccount, Pool};
 use crate::broker::store::{Account, Credential};
@@ -426,6 +427,15 @@ fn handle(config: &Config, counters: &Counters, stream: TcpStream) -> std::io::R
             return Ok(());
         }
     };
+
+    // Answered here rather than forwarded. A health check must not reach the
+    // provider: one that spent quota is one nobody could afford to run often.
+    if health::is_health_request(&request.target) {
+        let state = health::check(config, counters);
+        writer.write_all(&health::response(&state))?;
+        writer.flush()?;
+        return Ok(());
+    }
 
     let model = select::model_of(&request.body);
     let thread = select::thread_of(&request.headers);

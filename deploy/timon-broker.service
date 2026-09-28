@@ -1,0 +1,94 @@
+# Timon credential broker.
+#
+# Installed at /etc/systemd/system/timon-broker.service.
+#
+# Two things this exists for. First, nothing restarted the broker: it ran under
+# nohup, so a reboot or an OOM kill left it down until somebody noticed. Second,
+# and less obvious, the broker can fail while staying alive — a panicking thread
+# poisons its account lock, the port keeps accepting, and every request returns
+# 500 for the life of the process. Restart=always does not catch that, because
+# nothing exits. WatchdogSec does: the broker checks in only while it can
+# actually serve, so ceasing to check in is what triggers the restart.
+#
+# This decision followed from ruling out a personal-credential fallback
+# (2026-09-28). With no workaround for an outage, supervision is load-bearing.
+
+[Unit]
+Description=Timon credential broker
+Documentation=https://github.com/PageDen/timon
+After=network-online.target
+Wants=network-online.target
+# The broker is useless without its store, and a missing store should be a
+# refusal to start rather than a listener that refuses every request.
+ConditionPathIsDirectory=/home/workbench/.timon-broker/accounts
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/local/bin/timon broker serve \
+    --store /home/workbench/.timon-broker/accounts \
+    --listen 127.0.0.1:1456
+
+# The process holds pooled provider credentials, so it runs as the account that
+# owns them and nothing else.
+User=workbench
+Group=workbench
+
+Restart=always
+RestartSec=2s
+# Give up only on a genuine crash loop, so a persistent fault is visible in
+# `systemctl status` rather than hidden behind an endless restart.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# The dead-man's switch. The broker checks in at half this interval, and only
+# while a health check passes.
+WatchdogSec=60s
+
+# Startup is fast; a slow start means something is wrong with the store.
+TimeoutStartSec=30s
+TimeoutStopSec=20s
+
+# Hardening. This process reads every prompt on the host and holds the
+# credentials that pay for them, so it gets no more of the system than it needs.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# The one writable path: the credential store, because refresh rewrites it.
+ReadWritePaths=/home/workbench/.timon-broker
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+# Outbound TLS to the provider, and a loopback listener. Nothing else.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# A thread per connection with no cap is how one runaway script becomes
+# everybody's outage. These are ceilings, not a substitute for the per-user
+# limits the plan still owes.
+LimitNOFILE=4096
+TasksMax=512
+MemoryMax=2G
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timon-broker
+
+[Install]
+WantedBy=multi-user.target
