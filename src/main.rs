@@ -1251,6 +1251,16 @@ fn nix_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// The acceptance criteria of the tasks that finished.
+///
+/// A task that never ran has not failed its criteria — it has not been judged,
+/// and folding its criteria in would report a failure nobody caused.
+fn graph_criteria(
+    report: &timon::run::pipeline::PipelineReport,
+) -> Vec<timon::acceptance::Criterion> {
+    report.criteria_of_finished.clone().unwrap_or_default()
+}
+
 /// One task's outcome, in a line.
 fn describe_outcome(outcome: &timon::dag_run::Outcome) -> String {
     use timon::dag_run::Outcome;
@@ -1387,7 +1397,10 @@ fn run_execute(
                     report.result_branch.as_deref(),
                 );
                 let tested = report.result_branch.clone();
-                timon::run::pipeline::judge(&mut report, tested, Vec::new(), &checks);
+                // Only the criteria of tasks that finished. A task that never
+                // ran has not failed its criteria; it has not been judged.
+                let criteria = graph_criteria(&report);
+                timon::run::pipeline::judge(&mut report, tested, criteria, &checks);
                 match args.format {
                     ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
                     _ => {

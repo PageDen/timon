@@ -4,6 +4,7 @@
 //! verifier that overstates is worse than none: it converts "nobody looked" into
 //! "it's fine", which is the one output a developer cannot recover from.
 
+use timon::acceptance::Criterion;
 use timon::dag_run::{GraphReport, Outcome as TaskOutcome, TaskReport};
 use timon::verify::{CheckRun, Checks, Dimension, Outcome, Standing, Subject, verify};
 
@@ -52,7 +53,7 @@ impl Checks for MechanicalAcceptance {
             detail: "the suite passed".into(),
         })
     }
-    fn acceptance(&self, criteria: &[String]) -> (Standing, String) {
+    fn acceptance(&self, criteria: &[Criterion]) -> (Standing, String) {
         (
             self.0,
             format!("checked {} criterion/criteria", criteria.len()),
@@ -159,7 +160,9 @@ fn a_failed_task_is_repairable_and_the_defect_is_named() {
         execution: &execution,
         branch: Some("branch"),
         tested: None,
-        criteria: vec!["it works".into()],
+        criteria: vec![Criterion::FileExists {
+            path: "out.txt".into(),
+        }],
     };
     let verdict = verify(&subject, &NoChecks);
     match &verdict.outcome {
@@ -208,7 +211,9 @@ fn a_pass_requires_acceptance_to_have_been_established() {
         execution: &execution,
         branch: Some("branch"),
         tested: Some("abc".into()),
-        criteria: vec!["the endpoint returns 200".into()],
+        criteria: vec![Criterion::FileExists {
+            path: "endpoint.rs".into(),
+        }],
     };
 
     // Established and holding: this is the only shape that passes.
