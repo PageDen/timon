@@ -188,12 +188,21 @@ pub fn base_of(workspace: Option<&Path>) -> Base {
     }
     match git(&["stash", "create"]).filter(|s| !s.is_empty()) {
         Some(snapshot) => Base::Snapshot { commit, snapshot },
-        // The snapshot failed. Say the tree was dirty rather than claim it was
-        // clean: the difference is exactly what a reader needs.
-        None => Base::Snapshot {
-            commit,
-            snapshot: "unavailable".to_string(),
-        },
+        None => {
+            // `stash create` captures modifications to tracked files and
+            // nothing else, so a tree that differs only by untracked files
+            // produces no snapshot at all. That is not a failure and it is not
+            // a clean tree either: the worker will not see those files, and a
+            // report that said "clean" would be why nobody understood the
+            // result.
+            let uncaptured: Vec<String> = git(&["status", "--porcelain"])
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.starts_with("??"))
+                .map(|line| line[3..].trim().to_string())
+                .collect();
+            Base::HeadWithUncaptured { commit, uncaptured }
+        }
     }
 }
 

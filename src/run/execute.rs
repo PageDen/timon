@@ -191,6 +191,8 @@ fn post(broker: &str, path: &str, body: &str) -> std::io::Result<String> {
 pub struct Executed {
     pub run_id: String,
     pub route: Route,
+    /// The branch the worker's changes landed on, when it made any.
+    pub branch: Option<String>,
     /// The account-facing identity of the authority this ran under.
     pub grant_id: String,
     pub status: Status,
@@ -280,7 +282,62 @@ pub async fn execute(
         plan.grant_lifetime_secs,
     )?;
 
-    let outcome = run_worker(run, command, plan, &granted).await;
+    // Every worker with a repository works in its own worktree, whatever its
+    // command is allowed to do. Deciding by whether the command *looks* like it
+    // can write would mean parsing somebody's flags and being wrong once; this
+    // way a misconfigured command can still only damage a throwaway checkout.
+    //
+    // A read-only worker loses nothing by it: the worktree starts from the run's
+    // recorded base, snapshot included, so it sees the developer's real state
+    // and the report can say exactly which commit that was.
+    // Made before anything writes into it. Creating a subdirectory first leaves
+    // the parent at whatever the umask says, and the worker refuses an output
+    // directory that group or others can reach — correctly, since it holds a
+    // developer's prompt and a model's reply.
+    private_dir(&plan.output_root.join(&run.id)).map_err(ExecuteError::Planning)?;
+
+    let mut workspace = match (&run.workspace, run.base.start_from()) {
+        (Some(repository), Some(start)) => Some(
+            crate::worktree::Workspace::open(
+                repository,
+                &run.id,
+                start,
+                plan.output_root.join(&run.id).join("worktrees"),
+            )
+            .map_err(|error| ExecuteError::Planning(error.to_string()))?,
+        ),
+        // No repository: research and other work with nothing to isolate.
+        _ => None,
+    };
+
+    let worktree = match workspace.as_mut() {
+        Some(workspace) => Some(
+            workspace
+                .worktree_for(decision.route.as_str())
+                .map_err(|error| ExecuteError::Planning(error.to_string()))?,
+        ),
+        None => None,
+    };
+
+    let outcome = run_worker(
+        run,
+        command,
+        plan,
+        &granted,
+        worktree.as_ref().map(|tree| tree.path.as_path()),
+    )
+    .await;
+
+    // Whatever it changed becomes a branch, so a single-worker route hands back
+    // the same thing the planner route does: something to review, never an edit
+    // to the developer's files.
+    let branch = match (&workspace, &worktree) {
+        (Some(workspace), Some(tree)) => match workspace.commit_work(tree) {
+            Ok(Some(_)) => Some(tree.branch.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
 
     // The run's authority ends with the run, on every path out of here.
     revoke(&plan.broker, &run.id);
@@ -295,6 +352,7 @@ pub async fn execute(
     Ok(Executed {
         run_id: run.id.clone(),
         route: decision.route,
+        branch,
         grant_id: granted.id,
         status,
         output: outcome.as_ref().ok().and_then(|o| o.output.clone()),
@@ -532,6 +590,31 @@ impl crate::dag_run::Runner for WorktreeRunner {
     }
 }
 
+/// Creates a directory only its owner can reach.
+///
+/// Every directory in this run's output holds somebody's prompt and a model's
+/// reply, so the mode is the point rather than a formality.
+fn private_dir(path: &Path) -> Result<(), String> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    if !path.exists() {
+        builder
+            .create(path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
 /// Whether a writing task actually wrote, and what to say when it did not.
 ///
 /// A clean exit is not evidence of work. The first end-to-end run of the
@@ -639,6 +722,7 @@ async fn run_worker(
     command: &[std::ffi::OsString],
     plan: &Plan,
     granted: &Granted,
+    worktree: Option<&Path>,
 ) -> Result<WorkerOutput, String> {
     use crate::worker::{WorkerLimits, WorkerSpec, run_worker as spawn};
 
@@ -649,7 +733,11 @@ async fn run_worker(
     let spec = WorkerSpec {
         program: PathBuf::from(program),
         args: args.to_vec(),
-        cwd: run.workspace.clone(),
+        // The worktree when there is one, so the developer's own files are not
+        // what a worker is pointed at.
+        cwd: worktree
+            .map(Path::to_path_buf)
+            .or_else(|| run.workspace.clone()),
         env_set: granted
             .environment()
             .into_iter()
