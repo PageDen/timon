@@ -258,6 +258,25 @@ enum BrokerCommand {
     Accounts(BrokerAccountsArgs),
     /// Forward Codex traffic, injecting a pooled credential the caller cannot see
     Serve(BrokerServeArgs),
+    /// Renew an account's access token now, without waiting for it to near expiry
+    Refresh(BrokerRefreshArgs),
+}
+
+#[derive(Args)]
+struct BrokerRefreshArgs {
+    /// The account store.
+    #[arg(long, default_value = "/var/lib/timon-broker/accounts")]
+    store: PathBuf,
+    /// Which account to renew. Omit to renew every account that needs it.
+    #[arg(long)]
+    account: Option<String>,
+    /// Renew even when the current token is not near expiry.
+    ///
+    /// The case this exists for: a token can be *invalidated* by the provider
+    /// while still unexpired — changing a subscription plan does it — and the
+    /// clock cannot see that.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Args)]
@@ -630,6 +649,7 @@ fn run() -> Result<u8> {
         Command::Bridge(args) => return bridge_appserver(args),
         Command::Broker(BrokerCommand::Accounts(args)) => return broker_accounts(args),
         Command::Broker(BrokerCommand::Serve(args)) => return broker_serve(args),
+        Command::Broker(BrokerCommand::Refresh(args)) => return broker_refresh(args),
         Command::Orchestrate(args) => return orchestrate_run(args),
     };
     attempt_run(role, args)
@@ -898,6 +918,84 @@ fn broker_accounts(args: BrokerAccountsArgs) -> Result<u8> {
     } else {
         1
     })
+}
+
+/// Renews pooled access tokens on demand.
+///
+/// Exists because the broker's own refresh is driven by the clock, and the clock
+/// is not the only thing that ends a token. A provider can invalidate one while
+/// it still has days left on it — a subscription change does exactly that — and
+/// nothing in the credential file shows it. This is the operator's way to recover
+/// an account without a full re-login, and the honest answer when it cannot.
+fn broker_refresh(args: BrokerRefreshArgs) -> Result<u8> {
+    let store = broker::store::Store::open(&args.store).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let accounts = match &args.account {
+        Some(name) => vec![store.read(name)],
+        None => store
+            .accounts()
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .into_iter()
+            .collect(),
+    };
+    if accounts.is_empty() {
+        bail!("no accounts in {}", args.store.display());
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or_default();
+
+    let mut failures = 0;
+    for account in &accounts {
+        if !account.refreshable {
+            println!(
+                "{}: no refresh token; this account needs a fresh login",
+                account.name
+            );
+            failures += 1;
+            continue;
+        }
+        // Read only to decide whether renewal is due. The value goes no further.
+        let due = match broker::store::credential_of(account) {
+            Ok(credential) => broker::refresh::due(&credential.bearer, now),
+            Err(error) => {
+                println!("{}: cannot read the credential: {error}", account.name);
+                failures += 1;
+                continue;
+            }
+        };
+        if !due && !args.force {
+            println!(
+                "{}: not near expiry, left alone. Use --force if the provider is \
+refusing it anyway.",
+                account.name
+            );
+            continue;
+        }
+        match broker::refresh::refresh(&account.home) {
+            Ok(expiry) => println!(
+                "{}: renewed, now valid until {}",
+                account.name,
+                timon::recorder::render::utc(expiry)
+            ),
+            Err(error) => {
+                println!("{}: could not renew: {error}", account.name);
+                failures += 1;
+            }
+        }
+    }
+
+    if failures > 0 {
+        eprintln!(
+            "\n{failures} account(s) could not be renewed. An account whose refresh \
+token is also invalid has to be logged in again, as the user that owns it:\n  \
+CODEX_HOME={}/<account> codex login",
+            args.store.display()
+        );
+        return Ok(1);
+    }
+    Ok(0)
 }
 
 fn broker_serve(args: BrokerServeArgs) -> Result<u8> {

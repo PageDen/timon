@@ -81,6 +81,9 @@ pub struct Counters {
     /// Requests served by a second account after the first could not serve them.
     pub rotations: AtomicU64,
     pub refreshes: AtomicU64,
+    /// Renewals triggered by the provider refusing an unexpired token, which is
+    /// how a subscription change presents.
+    pub refreshes_after_refusal: AtomicU64,
     pub quota_reads: AtomicU64,
     pub bytes_to_upstream: AtomicU64,
     pub bytes_to_client: AtomicU64,
@@ -512,6 +515,9 @@ fn attempt(
     let candidates = usable_names(config);
     let mut excluded: Vec<String> = Vec::new();
     let mut last: Option<String> = None;
+    // Accounts already renewed once for this request, so a provider that keeps
+    // refusing cannot turn one request into a refresh loop.
+    let mut renewed: Vec<String> = Vec::new();
 
     for round in 1..=MAX_ATTEMPTS {
         let name = {
@@ -567,6 +573,9 @@ fn attempt(
 
         match open(config, request, &credential) {
             Ok(response) if response.status < 400 => {
+                if let Ok(mut pool) = config.pool.lock() {
+                    pool.accepted(&name);
+                }
                 return Ok(Served {
                     account: name,
                     head: response.head,
@@ -595,13 +604,40 @@ fn attempt(
                     continue;
                 }
                 if response.status == 401 || response.status == 403 {
-                    // The credential was refreshed before this attempt if it was
-                    // due, so a refusal now is about the account, not the clock.
-                    eprintln!(
-                        "timon broker: account {name} was refused by the provider \
-                         (status {}); trying another",
-                        response.status
-                    );
+                    // A refusal here is *not* the clock. The credential was
+                    // renewed before this attempt if it was near expiry, so
+                    // either it was invalidated while still valid-looking — a
+                    // subscription change does exactly that, and nothing in the
+                    // file shows it — or the account is genuinely finished.
+                    //
+                    // One forced renewal decides which, and it is worth trying
+                    // before writing the account off: the alternative is a pool
+                    // that silently shrinks whenever somebody changes a plan.
+                    if !renewed.contains(&name) {
+                        renewed.push(name.clone());
+                        match crate::broker::refresh::refresh(&account.home) {
+                            Ok(_) => {
+                                counters.refreshes.fetch_add(1, Ordering::Relaxed);
+                                counters
+                                    .refreshes_after_refusal
+                                    .fetch_add(1, Ordering::Relaxed);
+                                eprintln!(
+                                    "timon broker: {name} was refused with an unexpired \
+token; renewed it and retrying"
+                                );
+                                // Not excluded: the same account is tried again,
+                                // now with the credential the provider just issued.
+                                continue;
+                            }
+                            Err(error) => eprintln!(
+                                "timon broker: {name} was refused and could not be \
+renewed ({error}); it needs a fresh login"
+                            ),
+                        }
+                    }
+                    if let Ok(mut pool) = config.pool.lock() {
+                        pool.rejected(&name, now());
+                    }
                     excluded.push(name.clone());
                     last = Some(name);
                     continue;

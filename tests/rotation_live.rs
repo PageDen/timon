@@ -275,3 +275,139 @@ fn a_request_no_account_can_serve_is_refused_in_terms_the_caller_can_act_on() {
         1
     );
 }
+
+/// A provider that refuses one specific bearer and accepts anything else.
+///
+/// Models the failure that motivated this: a credential invalidated by the
+/// provider while still unexpired, which the clock cannot see.
+fn stub_refusing(dead_marker: &'static str) -> (u16, Seen) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen: Seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    std::thread::spawn(move || {
+        for incoming in listener.incoming() {
+            let Ok(stream) = incoming else { continue };
+            let record = Arc::clone(&record);
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                    if line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                    head.push_str(&line);
+                }
+                let mut body = vec![0u8; length];
+                let _ = reader.read_exact(&mut body);
+
+                let refused = head.contains(dead_marker);
+                record
+                    .lock()
+                    .unwrap()
+                    .push(if refused { "refused" } else { "served" }.to_string());
+
+                let mut stream = stream;
+                if refused {
+                    let payload = br#"{"error":{"message":"Your authentication token has been invalidated. Please try signing in again.","code":"token_invalidated"}}"#;
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\n\
+                             content-length: {}\r\nconnection: close\r\n\r\n",
+                            payload.len()
+                        )
+                        .as_bytes(),
+                    );
+                    let _ = stream.write_all(payload);
+                } else {
+                    let payload = b"data: SERVED\n\n";
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                             content-length: {}\r\nconnection: close\r\n\r\n",
+                            payload.len()
+                        )
+                        .as_bytes(),
+                    );
+                    let _ = stream.write_all(payload);
+                }
+                let _ = stream.flush();
+            });
+        }
+    });
+    (port, seen)
+}
+
+#[test]
+fn a_credential_the_provider_refuses_takes_its_account_out_of_the_pool() {
+    // Found in production: upgrading a subscription invalidated an access token
+    // that still had nine days left on it. Nothing in the credential file showed
+    // it, so the account looked perfectly healthy and every request to it failed.
+    //
+    // The broker tries one renewal — that is what recovers the real case — and
+    // when renewal cannot help either, stops offering the account rather than
+    // spending every request discovering the same refusal.
+    let root = tempfile::tempdir().unwrap();
+    account(root.path(), "acct2");
+    account(root.path(), "acct3");
+    // The refresh endpoint is unreachable from a test, so renewal fails here and
+    // the account is taken out — which is the path being asserted.
+    let (upstream_port, seen) = stub_refusing("sig-acct3");
+
+    let mut pool = Pool::new();
+    pool.observe("acct3", standing("acct3", 1, now()));
+    pool.observe("acct2", standing("acct2", 80, now()));
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listen = listener.local_addr().unwrap();
+    let config = Arc::new(Config {
+        listen,
+        upstream: format!("http://127.0.0.1:{upstream_port}"),
+        store: Store::open(root.path()).unwrap(),
+        serving: vec!["acct3".to_string(), "acct2".to_string()],
+        pool: std::sync::Mutex::new(pool),
+        read_timeout: std::time::Duration::from_secs(20),
+    });
+    let counters = Arc::new(Counters::default());
+    let served = Arc::clone(&counters);
+    let running = Arc::clone(&config);
+    std::thread::spawn(move || {
+        let _ = serve(running, served, listener, Arc::new(|| false));
+    });
+
+    // acct3 has far more headroom, so it is tried first and found refused.
+    let response = ask(listen.port(), "thread-one", "gpt-5.6-luna");
+    assert!(
+        response.contains("SERVED"),
+        "the caller should still get an answer, from the other account: {response}"
+    );
+    assert!(
+        !response.contains("token_invalidated"),
+        "nothing from the refused attempt reaches the client: {response}"
+    );
+    assert_eq!(*seen.lock().unwrap(), vec!["refused", "served"]);
+
+    // And it is remembered, so the next request does not rediscover it.
+    seen.lock().unwrap().clear();
+    let response = ask(listen.port(), "thread-two", "gpt-5.6-luna");
+    assert!(response.contains("SERVED"));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["served"],
+        "the refused account should not be tried again while the rejection stands"
+    );
+
+    // Health names it, so an operator can act before the last account goes.
+    let state = timon::broker::health::check(&config, &counters);
+    assert_eq!(state.accounts_rejected, vec!["acct3".to_string()]);
+    assert_eq!(state.accounts_usable, 1);
+    assert!(state.healthy, "one good account is still a working broker");
+}
