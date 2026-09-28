@@ -12,6 +12,7 @@
 //! could never reach a provider. An MCP server is launched by the harness rather
 //! than by the model, so the workers it starts are outside that sandbox.
 
+pub mod handoff;
 pub mod protocol;
 pub mod server;
 pub mod tools;
