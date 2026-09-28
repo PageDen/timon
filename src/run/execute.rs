@@ -21,7 +21,7 @@
 //! spending quota that no run is accountable for, which is the thing the whole
 //! credential design exists to prevent.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -44,6 +44,8 @@ pub enum ExecuteError {
     Store(RunError),
     /// The route is understood but not implemented yet.
     NotImplemented(Route),
+    /// The planner route failed before any task ran.
+    Planning(String),
 }
 
 impl std::fmt::Display for ExecuteError {
@@ -64,6 +66,7 @@ impl std::fmt::Display for ExecuteError {
             ExecuteError::NotImplemented(route) => {
                 write!(f, "the {} route is not built yet", route.as_str())
             }
+            ExecuteError::Planning(detail) => write!(f, "{detail}"),
         }
     }
 }
@@ -210,6 +213,12 @@ pub struct Plan {
     /// anything the command enforces.
     pub cheap_command: Vec<std::ffi::OsString>,
     pub strong_command: Vec<std::ffi::OsString>,
+    /// The command for a task that changes files.
+    ///
+    /// Separate because it needs the write sandbox, and because that is a
+    /// permission rather than a detail: a run where the reading and writing
+    /// commands are the same is a run where everything can write.
+    pub write_command: Vec<std::ffi::OsString>,
     /// The models each route runs on. Fixed by the operator, like the commands.
     pub cheap_model: Option<String>,
     pub strong_model: Option<String>,
@@ -255,8 +264,10 @@ pub async fn execute(
     now: i64,
 ) -> Result<Executed, ExecuteError> {
     let Some(command) = plan.command_for(decision.route) else {
-        // The planner route runs a lead and a graph, which is P3. Saying so is
-        // better than quietly running one worker and calling it the planner.
+        // The planner route is carried out by `run::pipeline`, which needs a
+        // repository and a graph. It is reached through `execute_planned`
+        // rather than here, because the two share almost nothing beyond the
+        // grant: one runs a worker, the other runs a plan.
         return Err(ExecuteError::NotImplemented(decision.route));
     };
 
@@ -295,6 +306,328 @@ pub async fn execute(
 struct WorkerOutput {
     output: Option<String>,
     tokens: Option<u64>,
+}
+
+/// Asks the planner for a graph, then carries it out.
+///
+/// The same authority as any other run: a grant first, and nothing starts
+/// without one. The planner is a worker like the others — it gets a task on
+/// stdin and returns text — so the only thing special about it is what is done
+/// with what it says.
+pub async fn execute_planned(
+    runs: &Runs,
+    run: &Run,
+    decision: &Decision,
+    plan: &Plan,
+    limits: &crate::dag::Limits,
+    bounds: crate::dag_run::Bounds,
+    now: i64,
+) -> Result<crate::run::pipeline::PipelineReport, ExecuteError> {
+    use crate::run::pipeline::{Pipeline, accept, carry_out, parse_plan, plan_prompt};
+
+    let Some(repository) = run.workspace.clone() else {
+        return Err(ExecuteError::Planning(
+            crate::run::pipeline::PipelineError::NoWorkspace.to_string(),
+        ));
+    };
+
+    let granted = authorise(
+        &plan.broker,
+        run,
+        decision.route.model_for(plan),
+        plan.grant_lifetime_secs,
+    )?;
+
+    // The planner runs on the strong command: choosing how to split work is the
+    // judgement the cheap route exists to avoid paying for.
+    let asked = plan_prompt(&run.goal, limits);
+    let planned = worker_session(
+        run.workspace.as_deref(),
+        &plan.strong_command,
+        &asked,
+        &granted.token,
+        plan.deadline,
+        &plan.output_root.join(&run.id).join("planner"),
+        &plan.cancel,
+    )
+    .await;
+
+    let answer = match planned {
+        Ok(output) => output,
+        Err(why) => {
+            revoke(&plan.broker, &run.id);
+            let _ = runs.settle(&run.id, Status::Finished, now, Some(&why));
+            return Err(ExecuteError::Planning(why));
+        }
+    };
+
+    let parsed = parse_plan(&answer).and_then(|plan| accept(&plan, limits));
+    let graph = match parsed {
+        Ok(graph) => graph,
+        Err(error) => {
+            revoke(&plan.broker, &run.id);
+            let detail = error.to_string();
+            let _ = runs.settle(&run.id, Status::Finished, now, Some(&detail));
+            return Err(ExecuteError::Planning(detail));
+        }
+    };
+
+    let workspace = crate::worktree::Workspace::open(
+        &repository,
+        &run.id,
+        run.base.commit().unwrap_or("HEAD"),
+        plan.output_root.join(&run.id).join("worktrees"),
+    )
+    .map_err(|error| ExecuteError::Planning(error.to_string()))?;
+
+    // The scheduler is synchronous — a task is a child process and it spends
+    // its life waiting — but worker supervision is async, and that supervision
+    // is what reaps a worker's process group. P4.3's "no process outlives its
+    // worker" check holds because of it, so it is not something to drop for
+    // the convenience of a sync call. The handle is captured here and the
+    // scheduler runs on a blocking thread, so each worker thread can hand its
+    // async work back to the runtime.
+    let runner = WorktreeRunner {
+        workspace: std::sync::Mutex::new(workspace),
+        command: plan.strong_command.clone(),
+        write_command: plan.write_command.clone(),
+        grant: granted.token.clone(),
+        deadline: plan.deadline,
+        output_root: plan.output_root.join(&run.id),
+        handle: tokio::runtime::Handle::current(),
+    };
+    let mut pipeline = Pipeline {
+        runner: &runner,
+        workspace: None,
+        limits: *limits,
+        bounds,
+        cancel: std::sync::Arc::clone(&plan.cancel),
+    };
+
+    let mut report = tokio::task::block_in_place(|| carry_out(run, &graph, &mut pipeline));
+
+    // Integration needs the workspace the runner has been using, so it happens
+    // after the graph rather than inside the pipeline's own copy.
+    let finished: Vec<String> = report
+        .graph
+        .tasks
+        .iter()
+        .filter(|task| task.outcome.finished())
+        .map(|task| task.label.clone())
+        .collect();
+    if !finished.is_empty() {
+        report.result_branch = runner
+            .workspace
+            .lock()
+            .ok()
+            .and_then(|mut workspace| workspace.integrate(&finished).ok());
+    }
+
+    revoke(&plan.broker, &run.id);
+    let _ = runs.settle(
+        &run.id,
+        Status::Finished,
+        now,
+        if report.graph.not_run.is_empty() {
+            None
+        } else {
+            Some("some tasks did not run")
+        },
+    );
+    Ok(report)
+}
+
+/// Runs each task in its own worktree, which is what P4.2 provides.
+struct WorktreeRunner {
+    workspace: std::sync::Mutex<crate::worktree::Workspace>,
+    command: Vec<std::ffi::OsString>,
+    write_command: Vec<std::ffi::OsString>,
+    grant: String,
+    deadline: std::time::Duration,
+    output_root: PathBuf,
+    handle: tokio::runtime::Handle,
+}
+
+impl crate::dag_run::Runner for WorktreeRunner {
+    fn run(
+        &self,
+        task: &crate::dag::Task,
+        input: &crate::dag_inputs::Input,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<crate::dag_inputs::Artifact, String> {
+        let tree = {
+            let mut workspace = self.workspace.lock().map_err(|_| "workspace poisoned")?;
+            workspace
+                .worktree_for(&task.label)
+                .map_err(|error| error.to_string())?
+        };
+
+        // A dependent writing task starts from the commit the host prepared, so
+        // what it edits already contains its dependencies' work.
+        if let crate::dag_inputs::Input::PreparedCommit { commit, .. } = input {
+            let reset = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&tree.path)
+                .args(["reset", "--hard", "--quiet", commit])
+                .status()
+                .map_err(|error| error.to_string())?;
+            if !reset.success() {
+                return Err(format!("could not start {} from {commit}", task.label));
+            }
+        }
+
+        let brief = brief_for(task, input);
+        // Handed back to the runtime, so the worker keeps its supervision and
+        // its process group is reaped when it ends.
+        let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            cancel.load(std::sync::atomic::Ordering::Relaxed),
+        ));
+        // A task that changes files needs the write sandbox. Giving every task
+        // that command would mean every task can write, so the permission
+        // follows the plan's own declaration.
+        let command = match task.access {
+            crate::dag::Access::Write => &self.write_command,
+            crate::dag::Access::Read => &self.command,
+        };
+        let outcome = self.handle.block_on(worker_session(
+            Some(&tree.path),
+            command,
+            &brief,
+            &self.grant,
+            self.deadline,
+            &self.output_root.join(&task.label),
+            &cancel_flag,
+        ))?;
+
+        let committed = {
+            let workspace = self.workspace.lock().map_err(|_| "workspace poisoned")?;
+            workspace
+                .commit_work(&tree)
+                .map_err(|error| error.to_string())?
+        };
+
+        // A clean exit is not evidence of work. A worker asked to change files
+        // can answer helpfully, exit 0 and change nothing — that happened the
+        // first time this ran end to end, because the sandbox refused the write
+        // and the model explained what it would have written. Reported as a
+        // failure, with what the worker said, because the alternative is a
+        // result branch that looks complete and contains nothing.
+        if let Some(complaint) = changed_nothing(task.access, committed.is_none(), &outcome) {
+            return Err(complaint);
+        }
+
+        Ok(crate::dag_inputs::Artifact::new(
+            &task.label,
+            1,
+            committed.unwrap_or(outcome),
+        ))
+    }
+
+    fn prepare(&self, merged: &[String]) -> Result<String, String> {
+        self.workspace
+            .lock()
+            .map_err(|_| "workspace poisoned".to_string())?
+            .prepare(merged)
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// Whether a writing task actually wrote, and what to say when it did not.
+///
+/// A clean exit is not evidence of work. The first end-to-end run of the
+/// planner route produced three tasks that all reported done and a result
+/// branch containing nothing: the sandbox had refused the writes and each
+/// worker explained, helpfully and at length, what it *would* have written.
+/// Exit code 0 throughout.
+///
+/// So a task that declared it changes files and changed none is a failure, and
+/// it carries what the worker said — which in that case named the cause
+/// precisely.
+pub fn changed_nothing(
+    access: crate::dag::Access,
+    nothing_committed: bool,
+    said: &str,
+) -> Option<String> {
+    if access != crate::dag::Access::Write || !nothing_committed {
+        return None;
+    }
+    Some(format!(
+        "this task was asked to change files and changed none. The worker said: {}",
+        said.trim().lines().take(3).collect::<Vec<_>>().join(" ")
+    ))
+}
+
+/// What a worker is told.
+///
+/// A task's own text, plus whatever its dependencies produced — inline, because
+/// a worker starts fresh and cannot go and look.
+fn brief_for(task: &crate::dag::Task, input: &crate::dag_inputs::Input) -> String {
+    let mut brief = task.task.clone();
+    if let crate::dag_inputs::Input::Artifacts { from } = input
+        && !from.is_empty()
+    {
+        brief.push_str("\n\nWhat the work you depend on produced:\n");
+        for artifact in from {
+            brief.push_str(&format!(
+                "\n--- {} ---\n{}\n",
+                artifact.producer, artifact.content
+            ));
+        }
+    }
+    brief
+}
+
+/// Runs one worker session and returns what it said.
+///
+/// Used by the planner and by every task, so both get the same supervision, the
+/// same grant handling and the same rule about where the task text goes.
+///
+/// The task goes on stdin and never into the arguments, so it cannot end up in
+/// a process listing that every account on the host can read.
+pub async fn worker_session(
+    cwd: Option<&Path>,
+    command: &[std::ffi::OsString],
+    task: &str,
+    grant: &str,
+    deadline: std::time::Duration,
+    output_dir: &Path,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<String, String> {
+    use crate::worker::{WorkerLimits, WorkerSpec, run_worker as spawn};
+
+    let (program, args) = command
+        .split_first()
+        .ok_or_else(|| "the worker command is empty".to_string())?;
+
+    let spec = WorkerSpec {
+        program: PathBuf::from(program),
+        args: args.to_vec(),
+        cwd: cwd.map(Path::to_path_buf),
+        env_set: vec![(GRANT_ENV.into(), grant.into())],
+        env_remove: Vec::new(),
+        task: task.to_string(),
+        output_dir: output_dir.to_path_buf(),
+        limits: WorkerLimits::with_deadline(deadline),
+    };
+    spec.validate().map_err(|error| format!("{error}"))?;
+
+    let watching = std::sync::Arc::clone(cancel);
+    let outcome = spawn(&spec, async move {
+        while !watching.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .map_err(|error| format!("{error}"))?;
+
+    if outcome.cancelled {
+        return Err("the run was cancelled".to_string());
+    }
+    if !outcome.succeeded() {
+        return Err(describe(&outcome));
+    }
+    std::fs::read_to_string(&outcome.stdout.path)
+        .map_err(|error| format!("reading the worker's output: {error}"))
 }
 
 /// Runs one worker session with the run's grant in its environment.

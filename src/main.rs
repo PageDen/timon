@@ -1251,6 +1251,40 @@ fn nix_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// One task's outcome, in a line.
+fn describe_outcome(outcome: &timon::dag_run::Outcome) -> String {
+    use timon::dag_run::Outcome;
+    match outcome {
+        Outcome::Done { .. } => "done".to_string(),
+        Outcome::Failed { detail } => format!("failed — {detail}"),
+        Outcome::NotRun { blocked_by } => {
+            format!("not run — waiting on {}", blocked_by.join(", "))
+        }
+        Outcome::Cancelled => "cancelled".to_string(),
+        Outcome::Skipped => "not started — past the deadline".to_string(),
+    }
+}
+
+/// Whether this host has qualified its write sandbox.
+///
+/// Absent means shut. A host that has never been qualified has not qualified,
+/// and P4.3 exists precisely so that this is not a guess.
+fn qualification_passes() -> bool {
+    let record = std::path::Path::new("eval/results/write-sandbox-2026-09-28.json");
+    let Ok(raw) = std::fs::read_to_string(record) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|value| {
+            value["runs"]
+                .as_array()
+                .and_then(|runs| runs.last().cloned())
+        })
+        .map(|latest| latest["verdict"] == "PASSED")
+        .unwrap_or(false)
+}
+
 /// Executes the route triage chose.
 ///
 /// Separated from recording because the two differ in the only way that
@@ -1264,7 +1298,7 @@ fn run_execute(
 ) -> Result<u8> {
     use timon::run::execute::{Plan, execute};
 
-    let default_command = |model: Option<&String>| -> Vec<std::ffi::OsString> {
+    let default_command = |model: Option<&String>, writes: bool| -> Vec<std::ffi::OsString> {
         // `codex exec` reading its task from stdin. The task never goes in the
         // arguments, where every account on the host could read it from a
         // process listing.
@@ -1272,6 +1306,12 @@ fn run_execute(
         if let Some(model) = model {
             command.push("-m".into());
             command.push(model.into());
+        }
+        if writes {
+            // The write sandbox, which P4.3 qualified. Its writable root is the
+            // worker's own worktree, because that is where it is started.
+            command.push("-s".into());
+            command.push("workspace-write".into());
         }
         command.push("--skip-git-repo-check".into());
         command.push("-".into());
@@ -1286,11 +1326,12 @@ fn run_execute(
         cheap_command: args
             .cheap_command
             .clone()
-            .unwrap_or_else(|| default_command(args.cheap_model.as_ref())),
+            .unwrap_or_else(|| default_command(args.cheap_model.as_ref(), false)),
         strong_command: args
             .strong_command
             .clone()
-            .unwrap_or_else(|| default_command(args.strong_model.as_ref())),
+            .unwrap_or_else(|| default_command(args.strong_model.as_ref(), false)),
+        write_command: default_command(args.strong_model.as_ref(), true),
         cheap_model: args.cheap_model.clone(),
         strong_model: args.strong_model.clone(),
         output_root: args
@@ -1316,6 +1357,52 @@ fn run_execute(
             on_signal.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     });
+
+    // The planner route runs a graph; the single-worker routes run one worker.
+    // They share the grant and nothing else, so they are separate calls rather
+    // than one function with a mode flag.
+    if decision.route == timon::triage::Route::Planner {
+        let report = runtime.block_on(timon::run::execute::execute_planned(
+            runs,
+            run,
+            decision,
+            &plan,
+            &timon::dag::Limits::default(),
+            timon::dag_run::Bounds {
+                concurrency: 2,
+                deadline: run.deadline,
+                // P4.3's gate. Read from the qualification record rather than
+                // assumed, and absent means shut.
+                writing_permitted: qualification_passes(),
+            },
+            now,
+        ));
+        return match report {
+            Ok(report) => {
+                match args.format {
+                    ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+                    _ => {
+                        println!("{}  planner route", report.run_id);
+                        for task in &report.graph.tasks {
+                            println!("  {:<20} {}", task.label, describe_outcome(&task.outcome));
+                        }
+                        if let Some(branch) = &report.result_branch {
+                            println!("\n  branch      {branch}");
+                        }
+                        if !report.graph.not_run.is_empty() {
+                            println!("  not run     {}", report.graph.not_run.join(", "));
+                        }
+                        println!("\n{}", report.caveat);
+                    }
+                }
+                Ok(if report.graph.complete { 0 } else { 1 })
+            }
+            Err(error) => {
+                eprintln!("timon run: {error}");
+                Ok(1)
+            }
+        };
+    }
 
     let executed = runtime.block_on(execute(runs, run, decision, &plan, now));
 

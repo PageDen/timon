@@ -22,12 +22,11 @@ attribution.
 
 ## Not built yet
 
-**Nothing joins a run to its worktrees.** `Workspace` makes them, the scheduler
-runs graphs, and the executor runs single-route work — but `timon run --execute`
-still runs one worker in the developer's own directory rather than in a worktree,
-and the planner route still reports that it is not built. Wiring those together
-is what turns P3 and P4 into something a developer can use, and it is the next
-piece rather than a gap in what exists.
+**The single-worker routes still run in the developer's own directory.** The
+planner route now runs each task in its own worktree; the cheap and strong
+routes do not, because a single read-only worker has nothing to isolate from.
+That stops being true the moment a single-worker route is allowed to write, and
+nothing currently prevents someone configuring exactly that.
 
 **Results are not reviewed.** `integrate` produces a branch; P5's verifier is
 what decides whether it should be offered, and it is not written. Until then a
