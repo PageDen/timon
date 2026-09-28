@@ -265,10 +265,10 @@ struct BrokerServeArgs {
     /// The account store.
     #[arg(long, default_value = "/var/lib/timon-broker/accounts")]
     store: PathBuf,
-    /// Which pooled account to serve. Slice 2 serves exactly one; rotation
-    /// across several is the next slice.
+    /// Serve only this pooled account. Omit to serve the whole pool, which is
+    /// the normal case: the broker then chooses per request.
     #[arg(long)]
-    account: String,
+    account: Option<String>,
     /// Loopback address to listen on. Refuses to bind anywhere else: this holds
     /// credentials for everyone, and reaching it must require being on the host.
     #[arg(long, default_value = "127.0.0.1:1456")]
@@ -920,27 +920,44 @@ fn broker_serve(args: BrokerServeArgs) -> Result<u8> {
     }
 
     let store = broker::store::Store::open(&args.store).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let account = store.read(&args.account);
-    if !account.usable() {
+    let inventory = broker::store::Inventory::of(&store).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Checked before binding, so a pool that cannot serve anything is a refusal
+    // to start rather than a listener that refuses every request.
+    let serving: Vec<String> = match &args.account {
+        Some(only) => {
+            let account = store.read(only);
+            if !account.usable() {
+                bail!(
+                    "account {only:?} cannot serve requests:\n  - {}",
+                    account.faults.join("\n  - ")
+                );
+            }
+            vec![account.name]
+        }
+        None => inventory
+            .accounts
+            .iter()
+            .filter(|account| account.usable())
+            .map(|account| account.name.clone())
+            .collect(),
+    };
+    if serving.is_empty() {
         bail!(
-            "account {:?} cannot serve requests:\n  - {}",
-            args.account,
-            account.faults.join("\n  - ")
+            "no pooled account in {} can serve requests. `timon broker accounts` \
+             says what is wrong with each.",
+            args.store.display()
         );
     }
-
-    // Read here and held in memory only. The value is never logged, never
-    // rendered, and never returned to a caller.
-    let credential = broker::store::credential_of(&account)
-        .map_err(|e| anyhow::anyhow!("reading the credential for {:?}: {e}", args.account))?;
 
     let config = Arc::new(broker::serve::Config {
         listen,
         upstream: args
             .upstream
             .unwrap_or_else(|| broker::serve::DEFAULT_UPSTREAM.to_string()),
-        bearer: credential.bearer,
-        account_id: credential.account_id,
+        store,
+        serving: serving.clone(),
+        pool: std::sync::Mutex::new(broker::select::Pool::new()),
         read_timeout: std::time::Duration::from_secs(args.read_timeout_secs),
     });
     let counters = Arc::new(broker::serve::Counters::default());
@@ -948,13 +965,22 @@ fn broker_serve(args: BrokerServeArgs) -> Result<u8> {
         std::net::TcpListener::bind(listen).with_context(|| format!("binding {listen}"))?;
 
     eprintln!(
-        "timon broker: serving account {:?} on {} -> {}",
-        args.account, listen, config.upstream
+        "timon broker: serving {} account(s) [{}] on {} -> {}",
+        serving.len(),
+        serving.join(", "),
+        listen,
+        config.upstream
     );
     eprintln!(
         "  callers are identified by uid from the kernel; a request whose caller \
 cannot be identified is refused, never attributed to a default."
     );
+    if serving.len() > 1 {
+        eprintln!(
+            "  a conversation stays on the account that started it; a new one goes \
+to whichever account has the most of its window left."
+        );
+    }
     broker::serve::serve(config, counters, listener, Arc::new(|| false))?;
     Ok(0)
 }
