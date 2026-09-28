@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.3.1 — 2026-09-28
+
+### The broker forwards, with a credential the caller cannot see (A4 slice 2)
+
+`timon broker serve` runs a loopback proxy: it identifies the caller from the
+kernel, substitutes a pooled account's credential for whatever the caller sent,
+forwards to the provider, and streams the answer back. One account for now;
+rotation across several is the next slice.
+
+**Streaming is the contract, and it is measured rather than asserted.** SSE chunks
+arrived at +0.00s, +0.25s, +0.50s and +0.75s through the proxy in an end-to-end
+test, so nothing is accumulating. Every read is written and flushed before the
+next is attempted, and the relay test counts flushes so buffering-until-the-end
+would fail it.
+
+**A caller cannot choose which account pays.** `authorization`,
+`chatgpt-account-id`, `openai-organization` and `openai-project` are stripped from
+the incoming request rather than merged with the injected pair — verified end to
+end: a client that sent `Bearer CALLER-TRIED-THIS` and its own organization header
+reached the upstream as the pooled bearer with no trace of either.
+
+**An unidentifiable caller is refused, never attributed to a default.** Identity
+comes from `/proc/net/tcp`, which is the kernel's answer rather than the client's
+claim. Two conditions that testing found rather than reasoning: the lookup must
+happen while the socket is `ESTABLISHED`, because a closed one reports uid 0 and
+would silently read as root, and a listening socket or the broker's own end of the
+connection must not match either. All three are tests.
+
+**It will not bind anywhere but loopback**, and refuses a faulty account rather
+than serving it.
+
+**Nothing about content is written anywhere.** `Debug` for a request is
+hand-written to print header *names* and a body *length*, because a derived one
+would print somebody's prompt the moment a request appeared in an error or a log
+line. The credential type has no `Debug`, `Display` or `Serialize` at all, so
+there is no formatting path to leak it. After a full request and SSE response
+passed through, the broker's own output was 234 bytes: its startup banner.
+
+Chunked request bodies are refused rather than mis-parsed, oversized header lines
+are refused before being stored, and an upstream closing without a clean TLS
+shutdown is treated as the end of a good answer rather than an error — the same
+lesson the citation verifier learned.
+
+
 ## v0.3.0 — 2026-09-27
 
 ### Pooled credential store for quota rotation (amendment A4, slice 1)

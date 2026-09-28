@@ -293,3 +293,70 @@ pub fn render(inventory: &Inventory) -> String {
     );
     out
 }
+
+/// The credential an account authenticates with.
+///
+/// Read only when a request is about to be served, held in memory, and never
+/// rendered: this type has no `Debug`, no `Serialize` and no `Display`, so there
+/// is no formatting path that can print it by accident.
+pub struct Credential {
+    pub bearer: String,
+    pub account_id: Option<String>,
+}
+
+/// Why a credential could not be read.
+#[derive(Debug)]
+pub enum CredentialError {
+    Unreadable(std::io::ErrorKind),
+    NotJson,
+    /// Neither an access token nor an API key, so there is nothing to send.
+    Absent,
+}
+
+impl std::fmt::Display for CredentialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CredentialError::Unreadable(kind) => {
+                write!(f, "{CREDENTIAL_FILE} could not be read: {kind}")
+            }
+            CredentialError::NotJson => write!(f, "{CREDENTIAL_FILE} is not valid JSON"),
+            CredentialError::Absent => write!(
+                f,
+                "no usable credential: neither an access token nor an API key"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CredentialError {}
+
+/// Reads the bearer an account should authenticate with.
+///
+/// Prefers the OAuth access token, falling back to an API key for an `apikey`
+/// account. Refreshing an expired token is a later slice; this returns whatever
+/// is stored.
+pub fn credential_of(account: &Account) -> Result<Credential, CredentialError> {
+    let text = std::fs::read_to_string(account.home.join(CREDENTIAL_FILE))
+        .map_err(|error| CredentialError::Unreadable(error.kind()))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| CredentialError::NotJson)?;
+    let tokens = parsed.get("tokens");
+    let bearer = tokens
+        .and_then(|t| t.get("access_token"))
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            parsed
+                .get("OPENAI_API_KEY")
+                .and_then(|v| v.as_str())
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or(CredentialError::Absent)?
+        .to_string();
+    let account_id = tokens
+        .and_then(|t| t.get("account_id"))
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    Ok(Credential { bearer, account_id })
+}
