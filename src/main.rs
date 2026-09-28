@@ -412,6 +412,21 @@ struct BrokerServeArgs {
     /// Seconds a client may hold a connection without completing a request.
     #[arg(long, default_value_t = 120)]
     read_timeout_secs: u64,
+    /// The model interactive sessions get, whatever they ask for.
+    ///
+    /// Omit to leave requests untouched, which is the default: installing this
+    /// release changes nothing until somebody decides it should.
+    #[arg(long)]
+    assign_model: Option<String>,
+    /// A model a caller may keep if it asks for it. Repeatable.
+    ///
+    /// For when a developer legitimately needs a specific model and the operator
+    /// agreed in advance.
+    #[arg(long = "allow-model")]
+    allow_models: Vec<String>,
+    /// Names the policy, so a substitution can say which rule produced it.
+    #[arg(long, default_value = "default")]
+    model_policy_version: String,
 }
 
 #[derive(Args)]
@@ -1426,6 +1441,11 @@ fn broker_serve(args: BrokerServeArgs) -> Result<u8> {
             .unwrap_or_else(|| broker::serve::DEFAULT_UPSTREAM.to_string()),
         store,
         serving: serving.clone(),
+        models: broker::policy::ModelPolicy {
+            assign: args.assign_model.clone(),
+            allowed: args.allow_models.clone(),
+            version: args.model_policy_version.clone(),
+        },
         pool: std::sync::Mutex::new(broker::select::Pool::new()),
         read_timeout: std::time::Duration::from_secs(args.read_timeout_secs),
     });
@@ -1449,6 +1469,16 @@ cannot be identified is refused, never attributed to a default."
             "  a conversation stays on the account that started it; a new one goes \
 to whichever account has the most of its window left."
         );
+    }
+    match &args.assign_model {
+        Some(model) => eprintln!(
+            "  model policy {:?}: sessions get {model}. A request that asks for \
+something else is served by {model} and told so on the response.",
+            args.model_policy_version
+        ),
+        None => {
+            eprintln!("  no model policy: requests are forwarded with whatever model they ask for.")
+        }
     }
     // Check in with the supervisor, if there is one. `ready()` is what releases
     // `Type=notify`, so ordering only completes once the port is actually open.

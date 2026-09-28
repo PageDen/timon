@@ -63,6 +63,7 @@ fn config(root: &std::path::Path, serving: &[&str]) -> Config {
         store: Store::open(root).unwrap(),
         serving: serving.iter().map(|name| name.to_string()).collect(),
         pool: std::sync::Mutex::new(Pool::new()),
+        models: timon::broker::policy::ModelPolicy::default(),
         read_timeout: std::time::Duration::from_secs(5),
     }
 }

@@ -35,6 +35,7 @@
 pub mod health;
 pub mod identity;
 pub mod notify;
+pub mod policy;
 pub mod quota;
 pub mod refresh;
 pub mod select;
