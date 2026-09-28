@@ -42,13 +42,39 @@ so, but a request asking for something the assigned model cannot do is not
 refused, because that needs a capability model per model. Guessing would be worse
 than the gap.
 
+## Qualified, with two things to keep in view
+
+**The write-sandbox gate passes as of 2026-09-28**, all nine checks probed. See
+`eval/results/write-sandbox-2026-09-28.json`, which keeps every run including the
+two that did not pass.
+
+Two results are narrower than their names, and both are recorded:
+
+*Hooks.* What was shown is that a `pre-commit` hook could not be triggered,
+because committing is refused. Not that every path to a hook is closed.
+
+*Processes.* The sandbox does **not** stop a worker spawning something that
+outlives it — under bare `codex exec` the background process survived. What makes
+the check hold is Timon's own worker supervision reaping the process group. The
+confinement comes from two places and only one of them is Codex's, so a change to
+worker supervision could break this without touching anything that looks like
+sandboxing.
+
 ## Operational
 
-**The broker runs as `workbench`, and so does development.** The store is owned
-by that login, so the developing account can read pooled credentials. The systemd
-unit bounds the blast radius — its own `User=`, the store the only writable path —
-but it does not change who can read. Needs its own service account before a
-second person uses the host. Open question 2 in the plan.
+**Fixed 2026-09-28: the broker has its own account and the store is not
+readable by workers.** It ran as `workbench`, the same login as the workers, and
+a probe confirmed a worker could read `auth.json` and return its bytes. The
+broker now runs as the system account `timon-broker` with the store at
+`/var/lib/timon-broker/accounts` at 0700, and the same probe is refused. The
+duplicate under `~/.timon-broker` was deleted — a second copy of a credential
+whose refresh token is single-use is not a backup, it is a way to kill the live
+one.
+
+**What it does not cover:** a worker runs as the developer, so it can still read
+that developer's own logins, `~/.codex/auth.json` among them. That is inherent to
+running as them and no sandbox undoes it. What changed is that the *pooled* store
+is no longer any developer's to read.
 
 **No per-user fairness limits.** `TasksMax`, `LimitNOFILE` and `MemoryMax` cap the
 process as a whole, so one runaway script can still occupy every slot for
