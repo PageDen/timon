@@ -152,6 +152,51 @@ fn check_workspace(path: &Path) -> Result<(), Refused> {
     Ok(())
 }
 
+/// What the work will start from, detected rather than assumed.
+///
+/// Lives here because both entry points need the same answer: a hand-off typed
+/// in a terminal and one made from inside a Codex session must record the base
+/// the same way, or the two would mean different things.
+///
+/// `git stash create` writes a commit for uncommitted work **without touching
+/// the working tree**, which is what makes it safe to do to somebody's checkout
+/// while they are in it.
+pub fn base_of(workspace: Option<&Path>) -> Base {
+    let Some(dir) = workspace else {
+        return Base::None;
+    };
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let Some(commit) = git(&["rev-parse", "HEAD"]).filter(|c| !c.is_empty()) else {
+        return Base::None;
+    };
+    let dirty = git(&["status", "--porcelain"])
+        .map(|status| !status.is_empty())
+        .unwrap_or(false);
+    if !dirty {
+        return Base::Head { commit };
+    }
+    match git(&["stash", "create"]).filter(|s| !s.is_empty()) {
+        Some(snapshot) => Base::Snapshot { commit, snapshot },
+        // The snapshot failed. Say the tree was dirty rather than claim it was
+        // clean: the difference is exactly what a reader needs.
+        None => Base::Snapshot {
+            commit,
+            snapshot: "unavailable".to_string(),
+        },
+    }
+}
+
 /// A run id: sortable by time, and unique without coordination.
 ///
 /// Time first so `recent` reads in order and an operator can see at a glance

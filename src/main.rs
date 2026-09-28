@@ -74,6 +74,8 @@ enum Command {
     Orchestrate(OrchestrateArgs),
     /// Hand a goal to Timon: preflight first, then a run that outlives the terminal.
     Run(HandoffArgs),
+    /// Serve the hand-off tool over stdio, for a developer's Codex session to call.
+    Handoff(HandoffServeArgs),
     /// Inspect and cancel hand-offs.
     #[command(subcommand)]
     Runs(RunsCommand),
@@ -120,6 +122,24 @@ struct HandoffArgs {
     preflight_only: bool,
     #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
     format: ReportFormat,
+}
+
+#[derive(Args)]
+struct HandoffServeArgs {
+    /// The run store. Defaults to the caller's own.
+    #[arg(long)]
+    store: Option<PathBuf>,
+    /// The repository this server serves. Authoritative: a session may narrow to
+    /// a path inside it, not redirect outside it. Defaults to the directory the
+    /// server was started in.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+    /// Attempts a hand-off gets when it does not ask.
+    #[arg(long, default_value_t = 64)]
+    default_max_attempts: u32,
+    /// The most attempts a hand-off may ask for. A session cannot raise this.
+    #[arg(long, default_value_t = 256)]
+    max_attempts_limit: u32,
 }
 
 #[derive(Subcommand)]
@@ -746,6 +766,7 @@ fn run() -> Result<u8> {
         Command::Broker(BrokerCommand::Refresh(args)) => return broker_refresh(args),
         Command::Orchestrate(args) => return orchestrate_run(args),
         Command::Run(args) => return run_start(args),
+        Command::Handoff(args) => return handoff_serve(args),
         Command::Runs(RunsCommand::List(args)) => return runs_list(args),
         Command::Runs(RunsCommand::Show(args)) => return runs_show(args),
         Command::Runs(RunsCommand::Cancel(args)) => return runs_cancel(args),
@@ -1019,51 +1040,6 @@ fn broker_accounts(args: BrokerAccountsArgs) -> Result<u8> {
     })
 }
 
-/// Detects what the work will start from.
-///
-/// Stated rather than assumed. A repository with uncommitted changes is the
-/// normal case, and a report that cannot say whether that work was included is
-/// one nobody can reproduce from.
-fn detect_base(workspace: Option<&std::path::Path>) -> timon::run::record::Base {
-    use timon::run::record::Base;
-    let Some(dir) = workspace else {
-        return Base::None;
-    };
-    let git = |args: &[&str]| -> Option<String> {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    };
-    let Some(commit) = git(&["rev-parse", "HEAD"]).filter(|c| !c.is_empty()) else {
-        return Base::None;
-    };
-    let dirty = git(&["status", "--porcelain"])
-        .map(|status| !status.is_empty())
-        .unwrap_or(false);
-    if !dirty {
-        return Base::Head { commit };
-    }
-    // Uncommitted work exists, so it is captured rather than silently included
-    // or silently dropped. `stash create` writes a commit without touching the
-    // working tree, which is what makes this safe to do to somebody's checkout.
-    match git(&["stash", "create"]).filter(|s| !s.is_empty()) {
-        Some(snapshot) => Base::Snapshot { commit, snapshot },
-        // The snapshot failed; say the tree was dirty rather than claim it was
-        // clean, because the difference is what a reader needs.
-        None => Base::Snapshot {
-            commit,
-            snapshot: "unavailable".to_string(),
-        },
-    }
-}
-
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1130,7 +1106,7 @@ fn run_start(args: HandoffArgs) -> Result<u8> {
         Some(path) => Some(path),
         None => std::env::current_dir().ok(),
     };
-    let base = detect_base(workspace.as_deref());
+    let base = timon::run::start::base_of(workspace.as_deref());
     let now = now_secs();
 
     let request = Request {
@@ -1189,6 +1165,35 @@ fn run_start(args: HandoffArgs) -> Result<u8> {
 fn nix_uid() -> u32 {
     // SAFETY: `getuid` cannot fail and touches no memory the caller owns.
     unsafe { libc::getuid() }
+}
+
+/// Serves the hand-off tool for one developer's Codex session.
+///
+/// Runs as that developer, which is what makes attribution the kernel's answer:
+/// the uid is this process's own, and a session cannot claim to be somebody
+/// else by asking nicely.
+fn handoff_serve(args: HandoffServeArgs) -> Result<u8> {
+    let workspace = match args.workspace {
+        Some(path) => Some(path),
+        None => std::env::current_dir().ok(),
+    };
+    let policy = timon::mcp::handoff::HandoffPolicy {
+        store: args.store.unwrap_or_else(default_run_store),
+        workspace_root: workspace,
+        default_max_attempts: args.default_max_attempts,
+        max_attempts_limit: args.max_attempts_limit,
+        attempt_reserve: timon::admission::DEFAULT_ATTEMPT_RESERVE,
+        principal_uid: nix_uid(),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(timon::mcp::server::serve_handoff(policy))?;
+    // The stdin pump can be parked on a blocking read that `abort` cannot
+    // interrupt, so the runtime is dropped without waiting for it. Learned the
+    // hard way: the bridge hung on exit for exactly this reason.
+    runtime.shutdown_timeout(std::time::Duration::from_millis(0));
+    Ok(0)
 }
 
 fn runs_list(args: RunsListArgs) -> Result<u8> {
