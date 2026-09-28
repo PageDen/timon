@@ -32,6 +32,7 @@
 //! Slice 1 is this module and nothing else. There is no proxy here, no forwarding,
 //! and no rotation — only the store and the means to see what is in it.
 
+pub mod grant;
 pub mod health;
 pub mod identity;
 pub mod notify;

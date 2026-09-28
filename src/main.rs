@@ -1447,6 +1447,7 @@ fn broker_serve(args: BrokerServeArgs) -> Result<u8> {
             version: args.model_policy_version.clone(),
         },
         pool: std::sync::Mutex::new(broker::select::Pool::new()),
+        grants: std::sync::Mutex::new(broker::grant::Grants::new()),
         read_timeout: std::time::Duration::from_secs(args.read_timeout_secs),
     });
     let counters = Arc::new(broker::serve::Counters::default());

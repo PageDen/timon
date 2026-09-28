@@ -70,14 +70,30 @@ pub const AFFINITY_SECS: i64 = 12 * 3600;
 #[derive(Debug, PartialEq, Eq)]
 pub enum NoAccount {
     PoolEmpty,
+    /// Every account was tried during this request and none could serve it.
+    ///
+    /// Distinct from exhaustion because the causes differ and so do the
+    /// remedies: a connection failure, a refused credential and a spent quota
+    /// window all end up here, and telling an operator their quota is gone when
+    /// the provider was simply unreachable sends them to the wrong place.
+    AllTried {
+        tried: usize,
+    },
     AllExhausted,
-    NoneServesModel { model: String },
+    NoneServesModel {
+        model: String,
+    },
 }
 
 impl std::fmt::Display for NoAccount {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NoAccount::PoolEmpty => write!(f, "the broker has no usable pooled account"),
+            NoAccount::AllTried { tried } => write!(
+                f,
+                "all {tried} pooled account(s) were tried for this request and none \
+                 could serve it; the reason for each is in the broker's log"
+            ),
             NoAccount::AllExhausted => write!(
                 f,
                 "every pooled account has reached its limit; the request was not forwarded"
@@ -308,6 +324,14 @@ impl Pool {
             .filter(|account| !exclude.contains(account))
             .collect();
         if remaining.is_empty() {
+            // Everything was tried during this request. Only call it exhaustion
+            // if the provider actually said so.
+            let exhausted = candidates.iter().all(|account| {
+                self.standings
+                    .get(account)
+                    .map(|standing| !standing.usable())
+                    .unwrap_or(false)
+            });
             // Everything was tried on this request. If a model was named and any
             // excluded account refused it, that is the specific cause.
             if let Some(model) = model
@@ -319,7 +343,13 @@ impl Pool {
                     model: model.to_string(),
                 };
             }
-            return NoAccount::AllExhausted;
+            return if exhausted {
+                NoAccount::AllExhausted
+            } else {
+                NoAccount::AllTried {
+                    tried: candidates.len(),
+                }
+            };
         }
         if let Some(model) = model
             && remaining

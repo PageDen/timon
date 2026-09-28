@@ -1,6 +1,6 @@
 [package]
 name = "timon"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
@@ -12,6 +12,7 @@ publish = false
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
+ring = "0.17"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
