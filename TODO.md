@@ -20,6 +20,19 @@ windows are the wrong unit below roughly a day of real use. Token counts are the
 only usable comparison for now; the window figure is for capacity, not
 attribution.
 
+## Not built yet
+
+**Nothing joins a run to its worktrees.** `Workspace` makes them, the scheduler
+runs graphs, and the executor runs single-route work — but `timon run --execute`
+still runs one worker in the developer's own directory rather than in a worktree,
+and the planner route still reports that it is not built. Wiring those together
+is what turns P3 and P4 into something a developer can use, and it is the next
+piece rather than a gap in what exists.
+
+**Results are not reviewed.** `integrate` produces a branch; P5's verifier is
+what decides whether it should be offered, and it is not written. Until then a
+result branch is a merge, not a recommendation.
+
 ## Known limits, accepted for now
 
 **Triage sends long mechanical work to a strong call.** A 380-character
