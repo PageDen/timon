@@ -108,3 +108,47 @@ One rule changed in response to this measurement, which is what the suite is for
   are one code change now go to a single strong worker.
 
 The expectations were not moved to match the rules. Only the rules moved.
+
+
+## Run 1 — 2026-09-28 — inconclusive, and why
+
+20 paired calls, 113,355 tokens, on `acct3`. **The cost gate did not decide**,
+and reporting the number it produced would have been a claim the data does not
+support.
+
+| | |
+|---|---|
+| Median ratio | 1.495 (+49.5%) |
+| Paired delta | median +1,022 tokens, **range −3,862 to +6,826** |
+| Won by | timon 4 pairs, direct 6 |
+| Quality | 9/10 against 8/10 — **PASS** |
+
+The spread is ten times the effect and the arms traded wins. One task cost the
+*same arm* 4,267 tokens on one repeat and 16,343 on another. A median ratio over
+that is arithmetic, not a measurement.
+
+**Two faults in the harness, both fixed before rerunning.**
+
+*Arm order was confounded with arm.* Timon always ran first and the direct call
+second. Both arms showed the first repeat costing more than the second, which is
+what a warming prompt cache looks like. Order is randomised per pair now.
+
+*Two repeats could not see past the noise.* Raised to five, and the report now
+shows the interquartile range, the paired delta with its full range, and how many
+pairs each arm won. A result that cannot be distinguished from noise now says
+INCONCLUSIVE rather than printing a verdict.
+
+A third fault cost nothing to fix because the transcripts were kept: tokens were
+read only from stdout, and `codex exec` writes its token report to stderr when
+the streams are captured separately. The first report said "tokens median nan"
+and was re-scored from the saved logs rather than re-run. **This is the fifth
+instrument in this project to be wrong on first contact with real data, and the
+first where the fault was in the experimental design rather than the scoring.**
+
+## What 113,355 tokens did to the quota window
+
+Nothing visible. `acct3` read 0% before and 0% after. At this scale the provider's
+percentage is too coarse to attribute anything, so **token counts are the only
+usable cost measure for P2-sized work**, and the quota figure is for capacity
+planning rather than comparison. Recorded here because the plan's budget language
+is written in windows, and windows cannot see work this small.

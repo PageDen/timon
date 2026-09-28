@@ -1,0 +1,162 @@
+[
+ {
+  "task": "g1",
+  "rep": 0,
+  "timon": {
+   "tokens": 5879,
+   "secs": 8.1,
+   "answer": "300",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 3216,
+   "secs": 8.8,
+   "answer": "300",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g1",
+  "rep": 1,
+  "timon": {
+   "tokens": 3216,
+   "secs": 11.6,
+   "answer": "300",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 5296,
+   "secs": 8.0,
+   "answer": "300",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g2",
+  "rep": 0,
+  "timon": {
+   "tokens": 7917,
+   "secs": 12.2,
+   "answer": "src/broker/grant.rs",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 1091,
+   "secs": 9.6,
+   "answer": "src/broker/grant.rs",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g2",
+  "rep": 1,
+  "timon": {
+   "tokens": 3182,
+   "secs": 7.6,
+   "answer": "src/broker/grant.rs",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 3174,
+   "secs": 10.1,
+   "answer": "src/broker/grant.rs",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g3",
+  "rep": 0,
+  "timon": {
+   "tokens": 8420,
+   "secs": 6.9,
+   "answer": "280",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 6384,
+   "secs": 13.9,
+   "answer": "280",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g3",
+  "rep": 1,
+  "timon": {
+   "tokens": 5388,
+   "secs": 9.4,
+   "answer": "280",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 1290,
+   "secs": 9.5,
+   "answer": "280",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g4",
+  "rep": 0,
+  "timon": {
+   "tokens": 6188,
+   "secs": 7.0,
+   "answer": "11",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 10050,
+   "secs": 9.9,
+   "answer": "11",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g4",
+  "rep": 1,
+  "timon": {
+   "tokens": 1130,
+   "secs": 8.1,
+   "answer": "11",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 3125,
+   "secs": 13.5,
+   "answer": "11",
+   "accepted": true
+  }
+ },
+ {
+  "task": "g5",
+  "rep": 0,
+  "timon": {
+   "tokens": 4267,
+   "secs": 7.0,
+   "answer": "CheapWorker, StrongWorker, Planner",
+   "accepted": true
+  },
+  "direct": {
+   "tokens": 4321,
+   "secs": 10.6,
+   "answer": "Planner",
+   "accepted": false
+  }
+ },
+ {
+  "task": "g5",
+  "rep": 1,
+  "timon": {
+   "tokens": 16343,
+   "secs": 8.1,
+   "answer": "Planner",
+   "accepted": false
+  },
+  "direct": {
+   "tokens": 13478,
+   "secs": 12.7,
+   "answer": "Planner",
+   "accepted": false
+  }
+ }
+]
