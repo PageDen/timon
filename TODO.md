@@ -22,11 +22,14 @@ attribution.
 
 ## Not built yet
 
-**The single-worker routes still run in the developer's own directory.** The
-planner route now runs each task in its own worktree; the cheap and strong
-routes do not, because a single read-only worker has nothing to isolate from.
-That stops being true the moment a single-worker route is allowed to write, and
-nothing currently prevents someone configuring exactly that.
+**Untracked files are never given to a worker.** `git stash create` captures
+modifications to tracked files and nothing else, and adding untracked files to a
+snapshot would mean touching the developer's checkout to do it. So a run against
+a tree with new files starts from the commit, and the report names the files
+that were left out rather than calling the tree clean. Closing it properly needs
+a way to build a commit from the index plus untracked paths without disturbing
+the working tree — `git stash create` will not do it, and nothing else obvious
+will either.
 
 **Results are not reviewed.** `integrate` produces a branch; P5's verifier is
 what decides whether it should be offered, and it is not written. Until then a

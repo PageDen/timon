@@ -1414,6 +1414,10 @@ fn run_execute(
                     println!("{}  {}", executed.run_id, executed.status.as_str());
                     println!("  route       {}", executed.route.as_str());
                     println!("  authority   {}", executed.grant_id);
+                    match &executed.branch {
+                        Some(branch) => println!("  branch      {branch}"),
+                        None => println!("  branch      none — the worker changed no files"),
+                    }
                     if let Some(detail) = &executed.detail {
                         println!("  note        {detail}");
                     }

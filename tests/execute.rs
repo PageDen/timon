@@ -189,3 +189,94 @@ fn a_finished_run_is_settled_rather_than_left_running() {
     // matters here is that the store is still readable and the run is findable.
     assert_eq!(runs.get(&run.id).unwrap().id, run.id);
 }
+
+#[test]
+fn a_worker_with_a_repository_works_in_a_worktree_not_the_developers_files() {
+    // A single-worker route used to run in the developer's own directory. It
+    // was harmless while every such command was read-only — and nothing stopped
+    // somebody configuring one that was not. Deciding by whether a command
+    // *looks* like it can write would mean parsing flags and being wrong once.
+    use timon::run::record::Base;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    git(&["init", "--quiet", "-b", "main", "."]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "--quiet", "-m", "seed"]);
+    let head = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout)
+        .trim()
+        .to_string();
+
+    // The base a run records is what a worker starts from.
+    let clean = Base::Head {
+        commit: head.clone(),
+    };
+    assert_eq!(clean.start_from(), Some(head.as_str()));
+
+    // With uncommitted work, the snapshot is what it starts from: the developer
+    // asked for work on the tree in front of them, not on the last commit.
+    let snapshot = Base::Snapshot {
+        commit: head.clone(),
+        snapshot: "abc123".to_string(),
+    };
+    assert_eq!(snapshot.start_from(), Some("abc123"));
+    assert_eq!(
+        snapshot.commit(),
+        Some(head.as_str()),
+        "and the report can still say what the snapshot was taken against"
+    );
+
+    // A snapshot that could not be taken falls back to the commit rather than
+    // to a name git would refuse.
+    let failed = Base::Snapshot {
+        commit: head.clone(),
+        snapshot: "unavailable".to_string(),
+    };
+    assert_eq!(failed.start_from(), Some(head.as_str()));
+
+    // Nothing to isolate when there is no repository at all.
+    assert_eq!(Base::None.start_from(), None);
+}
+
+#[test]
+fn untracked_files_are_reported_as_not_included_rather_than_as_a_clean_tree() {
+    // `git stash create` captures modifications to tracked files and nothing
+    // else, so a tree differing only by untracked files produces no snapshot.
+    // Calling that clean would be why nobody understood the result: the worker
+    // never saw those files.
+    use timon::run::record::Base;
+
+    let base = Base::HeadWithUncaptured {
+        commit: "c".repeat(40),
+        uncaptured: vec!["scratch.txt".into(), "notes.md".into()],
+    };
+    let described = base.describe();
+    assert!(
+        described.contains("2 untracked file(s) were NOT included"),
+        "{described}"
+    );
+    assert!(
+        described.contains("scratch.txt"),
+        "it names them: {described}"
+    );
+    assert!(
+        described.contains("without touching the working tree"),
+        "and says why it cannot: {described}"
+    );
+
+    // The run still starts from the commit, which is real and reproducible.
+    assert_eq!(base.start_from(), Some("c".repeat(40).as_str()));
+    assert_eq!(base.commit(), Some("c".repeat(40).as_str()));
+}

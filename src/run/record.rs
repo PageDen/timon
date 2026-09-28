@@ -72,6 +72,17 @@ pub enum Base {
     Head { commit: String },
     /// The commit at HEAD plus a snapshot of uncommitted work.
     Snapshot { commit: String, snapshot: String },
+    /// The working tree differs, and none of the difference could be captured.
+    ///
+    /// The case that produces this is untracked files: `git stash create`
+    /// captures modifications to tracked files and nothing else, and adding
+    /// untracked files to a snapshot would mean touching a developer's checkout
+    /// to do it. So the run starts from the commit, and says that the tree it
+    /// was asked about contained more than that.
+    HeadWithUncaptured {
+        commit: String,
+        uncaptured: Vec<String>,
+    },
     /// Not a repository. Research and other non-code work.
     None,
 }
@@ -79,7 +90,29 @@ pub enum Base {
 impl Base {
     pub fn commit(&self) -> Option<&str> {
         match self {
-            Base::Head { commit } | Base::Snapshot { commit, .. } => Some(commit),
+            Base::Head { commit }
+            | Base::Snapshot { commit, .. }
+            | Base::HeadWithUncaptured { commit, .. } => Some(commit),
+            Base::None => None,
+        }
+    }
+
+    /// The commit a worker should actually start from.
+    ///
+    /// The snapshot when there is one, because that is the developer's real
+    /// state: they asked for work on the tree in front of them, not on whatever
+    /// was last committed. `Base::commit` remains the commit itself, for a
+    /// report that needs to say what the snapshot was taken against.
+    pub fn start_from(&self) -> Option<&str> {
+        match self {
+            Base::Snapshot { snapshot, commit } => {
+                if snapshot == "unavailable" {
+                    Some(commit)
+                } else {
+                    Some(snapshot)
+                }
+            }
+            Base::Head { commit } | Base::HeadWithUncaptured { commit, .. } => Some(commit),
             Base::None => None,
         }
     }
@@ -92,6 +125,18 @@ impl Base {
                 "{} plus uncommitted work, snapshot {}",
                 short(commit),
                 short(snapshot)
+            ),
+            Base::HeadWithUncaptured { commit, uncaptured } => format!(
+                "{} — {} untracked file(s) were NOT included ({}); a snapshot cannot \
+                 capture them without touching the working tree",
+                short(commit),
+                uncaptured.len(),
+                uncaptured
+                    .iter()
+                    .take(3)
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Base::None => "not a repository".to_string(),
         }
