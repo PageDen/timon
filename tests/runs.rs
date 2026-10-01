@@ -51,7 +51,10 @@ fn a_run_survives_being_written_and_read_back() {
     assert_eq!(read.id, run.id);
     assert_eq!(read.goal, "summarise the changelog");
     assert_eq!(read.principal_uid, ALICE);
-    assert_eq!(read.status, Status::Running);
+    // Admission records a run; `--execute` is what moves it to `Running`. A
+    // preflight that said `running` sat in the status display as work in
+    // progress that would never move again.
+    assert_eq!(read.status, Status::Recorded);
     assert_eq!(read.base.commit(), Some("a".repeat(40).as_str()));
 }
 
@@ -80,6 +83,10 @@ fn a_restart_marks_what_it_left_behind_instead_of_lying_about_it() {
     let (_dir, runs) = store();
     let alive = admit(&runs, request("long job"), Base::None, NOW, None, RESERVE).unwrap();
     let done = admit(&runs, request("short job"), Base::None, NOW, None, RESERVE).unwrap();
+    // Both reached a model, so both were promoted out of `Recorded`. A run that
+    // was only ever recorded is not stranded by a restart, because nothing was
+    // running to strand.
+    runs.settle(&alive.id, Status::Running, NOW, None).unwrap();
     runs.settle(&done.id, Status::Finished, NOW + 10, None)
         .unwrap();
 
@@ -100,7 +107,8 @@ fn a_restart_marks_what_it_left_behind_instead_of_lying_about_it() {
 #[test]
 fn recovering_twice_is_not_an_error_and_strands_nothing_new() {
     let (_dir, runs) = store();
-    admit(&runs, request("job"), Base::None, NOW, None, RESERVE).unwrap();
+    let run = admit(&runs, request("job"), Base::None, NOW, None, RESERVE).unwrap();
+    runs.settle(&run.id, Status::Running, NOW, None).unwrap();
     assert_eq!(runs.interrupt_stale(NOW + 1).unwrap().len(), 1);
     assert_eq!(
         runs.interrupt_stale(NOW + 2).unwrap().len(),
@@ -123,6 +131,8 @@ fn only_the_principal_who_started_a_run_can_cancel_it() {
         RESERVE,
     )
     .unwrap();
+
+    runs.settle(&run.id, Status::Running, NOW, None).unwrap();
 
     let refused = runs.cancel(&run.id, BOB, NOW + 1).unwrap_err();
     assert!(matches!(refused, RunError::NotYours { .. }));
@@ -288,4 +298,41 @@ fn a_status_round_trips_through_its_text_form() {
     assert_eq!(Status::parse("nonsense"), None);
     assert!(Status::Running.live() && Status::Cancelling.live());
     assert!(!Status::Finished.live() && !Status::Interrupted.live());
+}
+
+/// A preflight is recorded, not running, and a restart leaves it alone.
+///
+/// `timon run` without `--execute` records a hand-off and sends nothing to a
+/// model. That used to be stored as `running`, so every preflight sat in
+/// `timon status` as work in progress forever — there is no path that resumes
+/// one, so the status was describing a run that would never move again.
+#[test]
+fn a_recorded_run_is_not_running_and_is_not_stranded_by_a_restart() {
+    let (_dir, runs) = store();
+    let run = admit(&runs, request("not run yet"), Base::None, NOW, None, RESERVE).unwrap();
+
+    assert_eq!(run.status, Status::Recorded);
+    assert!(!run.status.live(), "nothing is running, so nothing is live");
+    assert!(
+        !run.status.spent_anything(),
+        "a recorded run has not reached a model"
+    );
+
+    // A restart strands runs that were executing. This one was not.
+    let stranded = runs.interrupt_stale(NOW + 100).unwrap();
+    assert!(
+        stranded.is_empty(),
+        "a recorded run was never running, so a restart has nothing to report"
+    );
+    assert_eq!(runs.get(&run.id).unwrap().status, Status::Recorded);
+}
+
+/// Cancelling something that was never started is a no-op rather than an error:
+/// there is no worker to stop and no grant to revoke.
+#[test]
+fn cancelling_a_recorded_run_changes_nothing() {
+    let (_dir, runs) = store();
+    let run = admit(&runs, request("not run yet"), Base::None, NOW, None, RESERVE).unwrap();
+    let after = runs.cancel(&run.id, ALICE, NOW + 1).unwrap();
+    assert_eq!(after.status, Status::Recorded);
 }

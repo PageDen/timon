@@ -60,6 +60,8 @@ fn classify(run: &Run) -> Look {
     match run.status {
         Status::Cancelling => Look::Cancel,
         status if status.live() => Look::Continue,
+        // Terminal, or `Recorded` — a preflight that never ran. Either way
+        // there is nothing left to watch and nothing that could be cancelled.
         _ => Look::Finished,
     }
 }

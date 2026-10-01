@@ -813,7 +813,12 @@ async fn run_worker(
 /// Says what went wrong in the operator's terms rather than a struct dump.
 fn describe(outcome: &crate::worker::WorkerOutcome) -> String {
     if outcome.timed_out {
-        return "the worker passed its deadline and was stopped".to_string();
+        // Naming the lever matters: the per-worker deadline is derived from the
+        // run budget, so the fix is almost always a larger --budget-secs rather
+        // than anything about the task.
+        return "the worker passed its deadline and was stopped; its share of the \
+                run budget was too small for the task, so raise --budget-secs"
+            .to_string();
     }
     if outcome.cancelled {
         return "the worker was cancelled".to_string();
