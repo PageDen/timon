@@ -65,7 +65,7 @@ fn never_qualifying_is_not_the_same_as_passing() {
     let refused = writing_permitted(None).unwrap_err();
     assert!(refused.contains("never been qualified"));
     assert!(
-        refused.contains("timon qualify write-sandbox"),
+        refused.contains("timon qualify probe"),
         "the refusal should say how to fix it: {refused}"
     );
 }

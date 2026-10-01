@@ -26,17 +26,20 @@ fn never() -> std::future::Pending<()> {
 }
 
 /// True if the process exists and is not a zombie.
+///
+/// Through `ps`, which Linux and macOS both have, rather than `/proc/<pid>/stat`,
+/// which only Linux does. These tests are how process-group reaping is proven,
+/// and that matters on a Mac as much as here.
 fn process_alive(pid: u32) -> bool {
-    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(stat) => {
-            // The state field follows the parenthesised command name.
-            let state = stat
-                .rsplit_once(')')
-                .and_then(|(_, rest)| rest.trim().chars().next());
-            state != Some('Z')
-        }
-        Err(_) => false,
-    }
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    let state = String::from_utf8_lossy(&output.stdout);
+    let state = state.trim();
+    !state.is_empty() && !state.starts_with('Z')
 }
 
 async fn wait_until_dead(pid: u32) -> bool {
@@ -89,7 +92,8 @@ async fn task_is_not_visible_in_process_arguments() {
     let marker = "secret-marker-7f3a9c";
     let out = dir.path().join("out");
     // Print our own command line, then consume stdin.
-    let script = r#"tr '\0' ' ' < /proc/$$/cmdline; cat > /dev/null"#;
+    // `ps` rather than /proc/$$/cmdline, so this holds on a Mac as well.
+    let script = r#"ps -o args= -p $$; cat > /dev/null"#;
     let spec = sh(
         script,
         &format!("task containing {marker}"),

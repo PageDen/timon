@@ -387,6 +387,9 @@ fn a_non_loopback_peer_is_refused() {
     assert!(format!("{error}").contains("not a loopback address"));
 }
 
+/// The broker identifies callers through `/proc/net/tcp`, so it runs on Linux
+/// only. A Mac reaches a Linux broker through an SSH tunnel instead.
+#[cfg(target_os = "linux")]
 #[test]
 fn identifying_a_live_connection_returns_the_real_uid() {
     // End to end against the kernel rather than a fixture, with the connection

@@ -251,8 +251,14 @@ printf '{"method":"turn/completed","params":{"turnId":"t1"}}'
 }
 
 /// The exact bytes the fake server writes, independent of the proxy.
+/// Run through `bash`, the script's own interpreter, rather than executed:
+/// executing a file that another test's fork still holds open for writing fails
+/// with "Text file busy", which made this flake under parallel runs. Reading it
+/// with `bash` avoids the race. Not `sh`: where that is dash, its `printf`
+/// writes the `\xff` bytes differently and the comparison is meaningless.
 fn expected_bytes(script: &std::path::Path, seen: &std::path::Path) -> Vec<u8> {
-    let out = std::process::Command::new(script)
+    let out = std::process::Command::new("bash")
+        .arg(script)
         .env("SEEN", seen)
         .stdin(std::process::Stdio::null())
         .output()

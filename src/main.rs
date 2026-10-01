@@ -110,6 +110,18 @@ enum QualifyCommand {
     Status,
     /// Register a qualification record produced by probing this host.
     Accept(QualifyAcceptArgs),
+    /// Measure the write sandbox on this host and record the result.
+    Probe(QualifyProbeArgs),
+}
+
+#[derive(Args)]
+struct QualifyProbeArgs {
+    /// The Codex binary whose sandbox is measured. It must be the one workers use.
+    #[arg(long, default_value = "codex")]
+    codex: String,
+    /// Keep the scratch repository afterwards, to inspect what each check did.
+    #[arg(long)]
+    keep: bool,
 }
 
 #[derive(Args)]
@@ -134,9 +146,7 @@ enum ConfigCommand {
 
 /// This host's name, as a qualification record spells it.
 fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .map(|name| name.trim().to_string())
-        .unwrap_or_default()
+    timon::config::hostname()
 }
 
 /// Says whether writing is permitted, and what to do when it is not.
@@ -171,13 +181,99 @@ fn qualify_status() -> Result<u8> {
             println!("the sandbox be qualified before any worker writes, and absent");
             println!("means shut rather than assumed.");
             println!();
-            println!("To enable it, register a record produced by probing this host:");
-            println!("  timon qualify accept <record.json>");
+            println!("To enable it, measure this host's sandbox (free, no model call):");
+            println!("  timon qualify probe");
             println!();
             println!("It would be installed at {}", installed.display());
             Ok(1)
         }
     }
+}
+
+/// Measures the write sandbox here and records the result.
+///
+/// The record is written whether or not it passes, appended to earlier runs for
+/// the same host and Codex version, because a failure is information and the
+/// project keeps every run rather than only the one that went well.
+fn qualify_probe(args: QualifyProbeArgs) -> Result<u8> {
+    let version = std::process::Command::new(&args.codex)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .replace("codex-cli ", "")
+        });
+    let Some(version) = version else {
+        eprintln!(
+            "timon: `{} --version` did not run; is Codex installed?",
+            args.codex
+        );
+        return Ok(1);
+    };
+
+    let home = timon::config::timon_home();
+    let now = now_secs();
+    let scratch = home.join("probe").join(now.to_string());
+    let host = hostname();
+    println!(
+        "Probing the write sandbox with {} {version} on {host}…",
+        args.codex
+    );
+    println!("Nothing is sent to a model.\n");
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let qualification = match runtime.block_on(timon::sandbox_probe::probe(
+        &args.codex,
+        &scratch,
+        &host,
+        now,
+    )) {
+        Ok(q) => q,
+        Err(why) => {
+            eprintln!("timon: {why}");
+            let _ = std::fs::remove_dir_all(&scratch);
+            return Ok(1);
+        }
+    };
+    print!("{}", qualification.render());
+
+    let run = timon::sandbox_probe::Run {
+        taken_at: now,
+        verdict: if qualification.passed() {
+            "PASSED"
+        } else {
+            "NOT PASSED"
+        },
+        findings: qualification.findings.clone(),
+        what_this_does_not_cover: timon::sandbox_probe::DOES_NOT_COVER.to_vec(),
+    };
+    let installed = home.join("qualification.json");
+    let existing = std::fs::read_to_string(&installed)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    let record = timon::sandbox_probe::record(existing, &host, &version, &run);
+    std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
+    std::fs::write(&installed, serde_json::to_string_pretty(&record)?)
+        .with_context(|| format!("writing {}", installed.display()))?;
+    println!("\nrecorded in {}", installed.display());
+
+    if args.keep {
+        println!("scratch repository kept at {}", scratch.display());
+    } else {
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(scratch.join("repo"))
+            .args(["worktree", "remove", "--force"])
+            .arg(scratch.join("worktree"))
+            .output();
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+    Ok(if qualification.passed() { 0 } else { 1 })
 }
 
 /// Registers a qualification record for this host.
@@ -1445,6 +1541,7 @@ fn run() -> Result<u8> {
         Command::Status => return status(),
         Command::Qualify(QualifyCommand::Status) => return qualify_status(),
         Command::Qualify(QualifyCommand::Accept(args)) => return qualify_accept(args),
+        Command::Qualify(QualifyCommand::Probe(args)) => return qualify_probe(args),
         Command::Runs(RunsCommand::Diff(args)) => return runs_diff(args),
         Command::Runs(RunsCommand::Accept(args)) => return runs_accept(args),
         Command::Runs(RunsCommand::Discard(args)) => return runs_discard(args),
@@ -2530,6 +2627,18 @@ CODEX_HOME={}/<account> codex login",
 
 fn broker_serve(args: BrokerServeArgs) -> Result<u8> {
     use std::sync::Arc;
+
+    // The broker learns who is calling from `/proc/net/tcp`, which only Linux
+    // has. Anywhere else it would start, fail to identify anyone, and refuse
+    // every request with a message about identity rather than about the host.
+    if !cfg!(target_os = "linux") {
+        eprintln!(
+            "timon: the broker runs on Linux only, because it identifies callers \
+             through /proc/net/tcp. On a Mac, reach a Linux broker through an SSH \
+             tunnel instead:\n  ssh -N -L 1456:127.0.0.1:1456 <user>@<broker host>"
+        );
+        return Ok(2);
+    }
 
     let listen: std::net::SocketAddr = args
         .listen

@@ -143,3 +143,12 @@ fn an_empty_settings_struct_is_all_defaults() {
     assert!(settings.broker.is_none());
     assert!(settings.output_root.is_none());
 }
+
+/// From gethostname rather than /proc, which a Mac does not have. A qualified
+/// record with an empty host would match every machine.
+#[test]
+fn the_host_name_is_never_empty() {
+    let name = timon::config::hostname();
+    assert!(!name.is_empty());
+    assert!(!name.contains('\0'), "got {name:?}");
+}

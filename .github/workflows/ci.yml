@@ -16,3 +16,15 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # Timon runs on a developer's Mac, reaching the broker on a Linux host through
+  # an SSH tunnel. This is the only place it is built and tested on macOS, so a
+  # change that breaks the Mac shows up on the pull request rather than on a
+  # developer's machine.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: cargo test

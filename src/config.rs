@@ -192,3 +192,21 @@ pub fn starter() -> String {
 "
     .to_string()
 }
+
+/// This host's name.
+///
+/// From `gethostname(2)` rather than `/proc/sys/kernel/hostname`, which exists
+/// only on Linux: on a Mac that read returned nothing, so a qualification
+/// recorded there would have named no host at all, and the check that a record
+/// belongs to this machine would have compared two empty strings.
+pub fn hostname() -> String {
+    let mut buffer = [0u8; 256];
+    // SAFETY: the buffer is valid for its whole length, and gethostname writes
+    // at most that many bytes.
+    let result = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+    if result != 0 {
+        return String::new();
+    }
+    let end = buffer.iter().position(|&b| b == 0).unwrap_or(buffer.len());
+    String::from_utf8_lossy(&buffer[..end]).trim().to_string()
+}

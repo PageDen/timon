@@ -245,7 +245,7 @@ pub fn writing_permitted(qualification: Option<&Qualification>) -> Result<(), St
         )),
         None => Err(
             "the write sandbox has never been qualified on this host. Run \
-             `timon qualify write-sandbox`; writing workers are disabled until it passes"
+             `timon qualify probe`; writing workers are disabled until it passes"
                 .to_string(),
         ),
     }
