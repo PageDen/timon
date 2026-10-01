@@ -1251,6 +1251,16 @@ fn nix_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// The acceptance criteria of the tasks that finished.
+///
+/// A task that never ran has not failed its criteria — it has not been judged,
+/// and folding its criteria in would report a failure nobody caused.
+fn graph_criteria(
+    report: &timon::run::pipeline::PipelineReport,
+) -> Vec<timon::acceptance::Criterion> {
+    report.criteria_of_finished.clone().unwrap_or_default()
+}
+
 /// One task's outcome, in a line.
 fn describe_outcome(outcome: &timon::dag_run::Outcome) -> String {
     use timon::dag_run::Outcome;
@@ -1378,7 +1388,19 @@ fn run_execute(
             now,
         ));
         return match report {
-            Ok(report) => {
+            Ok(mut report) => {
+                // The project's own checks, run against the result branch. A
+                // repository that declares none gets `NotApplicable` rather
+                // than a silent pass.
+                let checks = timon::verify::ProjectChecks::for_repository(
+                    run.workspace.as_deref(),
+                    report.result_branch.as_deref(),
+                );
+                let tested = report.result_branch.clone();
+                // Only the criteria of tasks that finished. A task that never
+                // ran has not failed its criteria; it has not been judged.
+                let criteria = graph_criteria(&report);
+                timon::run::pipeline::judge(&mut report, tested, criteria, &checks);
                 match args.format {
                     ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
                     _ => {
@@ -1392,7 +1414,13 @@ fn run_execute(
                         if !report.graph.not_run.is_empty() {
                             println!("  not run     {}", report.graph.not_run.join(", "));
                         }
-                        println!("\n{}", report.caveat);
+                        match (&report.verdict, report.caveat) {
+                            (Some(verdict), _) => {
+                                println!("\n{}", verdict.render());
+                            }
+                            (None, Some(caveat)) => println!("\n{caveat}"),
+                            (None, None) => {}
+                        }
                     }
                 }
                 Ok(if report.graph.complete { 0 } else { 1 })

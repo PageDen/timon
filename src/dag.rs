@@ -62,6 +62,13 @@ pub struct Task {
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub access: Access,
+    /// What must be true of the result for this task to have been done.
+    ///
+    /// Written by the planner before the work runs, which is the only time it
+    /// can be written honestly: criteria invented afterwards describe what
+    /// happened rather than what was wanted.
+    #[serde(default)]
+    pub acceptance: Vec<crate::acceptance::Criterion>,
 }
 
 /// What the planner produced.

@@ -355,6 +355,7 @@ fn a_writing_graph_runs_in_worktrees_and_a_dependant_sees_its_dependency() {
         task: format!("write {label}"),
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
         access: Access::Write,
+        acceptance: Vec::new(),
     };
     let plan = validate(
         &Plan {

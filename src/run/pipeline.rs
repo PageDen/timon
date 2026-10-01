@@ -78,9 +78,13 @@ pub struct PipelineReport {
     pub graph: GraphReport,
     /// The branch to review, when integration got that far.
     pub result_branch: Option<String>,
-    /// Said plainly, because a clean exit is not approval.
-    pub verified: bool,
-    pub caveat: &'static str,
+    /// The criteria of the tasks that finished, gathered while the graph was
+    /// still to hand. A task that never ran has not failed its criteria.
+    pub criteria_of_finished: Option<Vec<crate::acceptance::Criterion>>,
+    /// What the verifier made of it, when one ran.
+    pub verdict: Option<crate::verify::Verdict>,
+    /// Said plainly when nothing judged the result.
+    pub caveat: Option<&'static str>,
 }
 
 /// What a planner route needs from the host.
@@ -111,9 +115,18 @@ Mark a task `\"access\": \"write\"` when it changes files, and `\"read\"` when i
 only reads. Writing tasks that touch the same code should be one task, not \
 several — separate workers editing the same files conflict, and the host will \
 not choose between them.\n\n\
+Give each task an `acceptance` list: what must be true of the files afterwards \
+for it to have been done. These are checked mechanically, so they must be \
+claims about files rather than descriptions of quality — \
+`{{\"kind\":\"file_exists\",\"path\":\"NOTES.md\"}}`, \
+`{{\"kind\":\"file_contains\",\"path\":\"README.md\",\"text\":\"NOTES.md\"}}`, \
+`{{\"kind\":\"file_absent\",\"path\":\"old.rs\"}}`, or \
+`{{\"kind\":\"file_omits\",\"path\":\"lib.rs\",\"text\":\"deprecated_fn\"}}`. Paths are \
+relative to the repository. A task with no checkable criteria gets none, and its \
+result will be reported as unverified rather than as done.\n\n\
 At most {} tasks, at most {} deep. Fewer where fewer will do.\n\n\
 Reply with JSON only:\n\
-{{\"tasks\":[{{\"label\":\"short-name\",\"task\":\"the complete task\",\"depends_on\":[],\"access\":\"read\"}}],\"notes\":\"why you split it this way\"}}",
+{{\"tasks\":[{{\"label\":\"short-name\",\"task\":\"the complete task\",\"depends_on\":[],\"access\":\"read\",\"acceptance\":[{{\"kind\":\"file_exists\",\"path\":\"x.md\"}}]}}],\"notes\":\"why you split it this way\"}}",
         limits.max_tasks, limits.max_depth
     )
 }
@@ -210,14 +223,44 @@ pub fn carry_out<R: Runner + Sync>(
         None => None,
     };
 
+    let criteria_of_finished = report
+        .tasks
+        .iter()
+        .filter(|task| task.outcome.finished())
+        .filter_map(|task| graph.task(&task.label))
+        .flat_map(|task| task.acceptance.clone())
+        .collect();
+
     PipelineReport {
         run_id: run.id.clone(),
         notes: graph.notes.clone(),
         graph: report,
         result_branch,
-        verified: false,
-        caveat: "Nothing here judged the result. The branch is a merge of what the \
-                 workers produced, not a recommendation: the verifier that would \
-                 decide whether it is worth offering is P5 and is not built.",
+        criteria_of_finished: Some(criteria_of_finished),
+        verdict: None,
+        caveat: Some(NOT_JUDGED),
     }
+}
+
+/// Said when nothing judged a result, so a clean exit is not read as approval.
+pub const NOT_JUDGED: &str = "Nothing judged this result. The branch is a merge of what the workers produced, not a recommendation.";
+
+/// Judges a finished run and attaches the verdict.
+///
+/// Separate from carrying it out, because the two fail for different reasons and
+/// a verifier that cannot run should not make a completed run look failed.
+pub fn judge<C: crate::verify::Checks>(
+    report: &mut PipelineReport,
+    tested: Option<String>,
+    criteria: Vec<crate::acceptance::Criterion>,
+    checks: &C,
+) {
+    let subject = crate::verify::Subject {
+        execution: &report.graph,
+        branch: report.result_branch.as_deref(),
+        tested,
+        criteria,
+    };
+    report.verdict = Some(crate::verify::verify(&subject, checks));
+    report.caveat = None;
 }

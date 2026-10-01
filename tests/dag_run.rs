@@ -18,6 +18,7 @@ fn task(label: &str, depends_on: &[&str]) -> Task {
         task: format!("do {label}"),
         depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
         access: Access::Read,
+        acceptance: Vec::new(),
     }
 }
 

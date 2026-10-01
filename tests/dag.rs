@@ -15,6 +15,7 @@ fn task(label: &str, depends_on: &[&str]) -> Task {
         task: format!("do {label}"),
         depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
         access: Access::Read,
+        acceptance: Vec::new(),
     }
 }
 
@@ -107,12 +108,14 @@ fn every_fault_is_reported_at_once_not_one_per_round_trip() {
                 task: "".into(),
                 depends_on: vec![],
                 access: Access::Read,
+                acceptance: Vec::new(),
             },
             Task {
                 label: "a".into(),
                 task: "do a".into(),
                 depends_on: vec!["ghost".into()],
                 access: Access::Read,
+                acceptance: Vec::new(),
             },
         ]),
         &Limits::default(),
@@ -366,6 +369,7 @@ fn acceptance_b_sees_the_exact_interface_a_defined() {
                 task: "build the screen on the API".into(),
                 depends_on: vec!["api".into()],
                 access: Access::Read,
+                acceptance: Vec::new(),
             },
         ]),
         &Limits::default(),
