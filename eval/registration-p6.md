@@ -330,8 +330,75 @@ built and validated at zero spend. What is needed from Chris:
   measurement rather than budget — concurrent use makes the quota figures an
   upper bound with the contamination named.
 
-And one fact to settle first: **whether `prolite` on `acct3` serves the strong
-model.** The strong arm is meaningless if it silently runs on something else,
-and the models endpoint is known to lie about exactly this.
+### Settled 2026-10-01: both candidate models serve on `acct3`
+
+The models endpoint lies about capability, so this was answered by calling them.
+One trivial request each — *"Reply with the single word: ok"* — pinned to
+`acct3` through the running broker:
+
+| Model | Answered | Tokens |
+|---|---|---|
+| `gpt-5.6-luna` | `ok` | 4,598 |
+| `gpt-5.5` | `ok` | 8,020 |
+
+Both serve. The capability worry that produced this item — the original defect on
+the `go` plan — does not apply to either model on this account today. Cost: 12,618
+tokens, one call per model.
+
+The plan name itself could not be confirmed from this login, because the account
+store is `0700` owned by `timon-broker` and no longer any developer's to read,
+which is the service-account fix working as intended. What is confirmed is the
+operationally useful fact: both models answer on `acct3` now, whatever the plan
+is called.
+
+**Which of the two is the strong model is not settled, and it is not mine to
+assume.** `gpt-5.6-luna` carries the higher version number and is what the P2
+gate used; `gpt-5.5` is the local Codex default. Getting the assignment backwards
+would invert gate 2, since the pipeline's planner would run on the weaker model
+while the "single strong call" arm ran on the better one. The runner therefore
+requires both names explicitly and **refuses to start if they are equal** — see
+below.
+
+### A fault in the runner, found before it spent anything
+
+Both model flags defaulted to `gpt-5.6-luna`, copied from the P2 runner. For P2
+that was correct: it compared the fast path against a direct call on the *same*
+model, so routing overhead was the only difference between the arms. Here it
+would have **collapsed the strong and cheap arms into one**, making gate 2 a
+comparison of the pipeline against itself and leaving the cheap arm unable to do
+the one job it has — detecting a suite so easy that a cheap call matches the
+pipeline. Both flags are now required and must differ.
+
+### The spend estimate was wrong, and is revised upward
+
+The registered estimate — 1.0–1.5M tokens, from "P2's 3,200-token median session
+× five sessions per run" — rested on P2's tasks, which were one-turn read-only
+questions against a small fixture repository. The probe above is the first
+measurement of a session in *this* repository, and a **one-word answer cost 4,598
+and 8,020 tokens**. That is the floor for any session here, before any work is
+done, because the session loads the repository's own context first.
+
+| | runs | revised |
+|---|---|---|
+| Pipeline | 15 | ~75–150k each → **1.1–2.3M** |
+| Strong | 15 | ~15–25k each → **225–375k** |
+| Cheap | 15 | ~10–20k each → **150–300k** |
+
+**Order 1.5–3.0M tokens, roughly double what was registered.** Recorded as a
+correction rather than quietly updated: the first figure was an estimate built on
+the wrong reference work, and the measurement that fixed it cost 12,618 tokens.
+
+**Which is why the recommendation is to run it in two stages.** One task, three
+repeats, nine sessions — around 150k tokens — then read the actual per-run cost
+and decide whether to commit to the remaining four tasks. An estimate that has
+already proved wrong by a factor of two once should not be the basis for
+authorising its own full value. `--task p1` runs the first stage.
+
+**Staging does not cost the counterbalance**, which was the thing worth checking
+before recommending it. Three pairs give each arm each position once and twelve
+give four each, so the union is five each — identical to a single run of fifteen.
+Verified rather than assumed, because a split that quietly unbalanced arm order
+would reintroduce the confound that made run 1 of the P2 gate read 1.495 against
+a true 1.129.
 
 `--dry-run` prints the full schedule and arm order and spends nothing.

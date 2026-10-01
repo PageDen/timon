@@ -175,10 +175,27 @@ def run_pipeline(task, args, out):
         drop_worktree(tree)
 
     # Tokens across every session the route spent: planner, workers, judge.
+    #
+    # Scoped to this run's own directory and to the two transcript names codex
+    # writes, rather than everything beneath the output root. Two reasons, both
+    # found by probing a real run before spending anything on the gate:
+    #
+    # A worker's worktree is a full checkout of the repository, so a glob for
+    # `*.log` and `*.txt` under the output root walks it. Nothing tracked here
+    # matches today, but a task that writes a log file — which these tasks
+    # plausibly could — would have its own output counted as model tokens.
+    #
+    # And a glob over the output root sums every run that has ever used it. The
+    # probe read 12,618 tokens across two unrelated runs that shared a
+    # directory. Keying on the run id makes a reused directory harmless.
     tokens = 0
     seen = False
-    for log in run_out.rglob("*"):
-        if log.is_file() and log.suffix in (".log", ".txt"):
+    run_id = run.get("run_id")
+    transcripts = run_out / run_id if run_id else run_out
+    for log in transcripts.rglob("*"):
+        if "worktrees" in log.parts:
+            continue
+        if log.is_file() and log.name in ("stdout.log", "stderr.log"):
             found = tokens_of(lines_of(log))
             if found is not None:
                 tokens += found
@@ -209,12 +226,23 @@ def main():
     parser.add_argument("--ceiling-tokens", type=int, required=True,
                         help="Per-account spend ceiling. No default: a default "
                              "would be this script approving its own spend")
-    parser.add_argument("--cheap-model", default="gpt-5.6-luna")
-    parser.add_argument("--strong-model", default="gpt-5.6-luna")
+    # Required, and required to differ. P2's runner defaulted both to one model
+    # and that was right for its question: it compared the fast path against a
+    # direct call on the *same* model, so routing overhead was the only
+    # difference. Copying those defaults here would have collapsed the strong
+    # and cheap arms into one, silently turning gate 2 into a comparison of the
+    # pipeline against itself and leaving the cheap-arm control unable to detect
+    # an easy suite. Caught before any run; nothing was spent on it.
+    parser.add_argument("--strong-model", required=True)
+    parser.add_argument("--cheap-model", required=True)
     parser.add_argument("--budget-secs", type=int, default=300)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--timon", default="/usr/local/bin/timon")
     parser.add_argument("--seed", type=int, default=20261001)
+    parser.add_argument("--task", action="append",
+                        help="Run only these suite task ids. For staging a gate: "
+                             "one task first, read the real cost, then decide "
+                             "whether to commit to the rest")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the plan and the arm order, spend nothing")
     args = parser.parse_args()
@@ -228,15 +256,35 @@ def main():
         return 2
     print(check.stdout.strip().splitlines()[-1])
 
+    if args.strong_model == args.cheap_model:
+        print(
+            f"--strong-model and --cheap-model are both {args.strong_model!r}. The "
+            "registered arms are the pipeline, a single strong call and a single "
+            "cheap call; with one model the last two are the same arm and gate 2 "
+            "compares the pipeline against itself.",
+            file=sys.stderr,
+        )
+        return 2
+
     args.suite_data = json.load(open(args.suite))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
+    chosen = args.suite_data["tasks"]
+    if args.task:
+        wanted = set(args.task)
+        chosen = [t for t in chosen if t["id"] in wanted]
+        missing = wanted - {t["id"] for t in chosen}
+        if missing:
+            print(f"no such task(s) in the suite: {', '.join(sorted(missing))}",
+                  file=sys.stderr)
+            return 2
+
     rng = random.Random(args.seed)
-    orders = balanced_orders(len(args.suite_data["tasks"]) * args.repeats, rng)
+    orders = balanced_orders(len(chosen) * args.repeats, rng)
     schedule = [
         (task, rep, orders.pop())
-        for task in args.suite_data["tasks"]
+        for task in chosen
         for rep in range(args.repeats)
     ]
 
