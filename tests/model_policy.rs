@@ -261,6 +261,7 @@ fn ask(port: u16, thread: &str, model: &str) -> String {
     String::from_utf8_lossy(&response).to_string()
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn the_client_is_told_on_the_response_which_model_actually_served_it() {
     let root = tempfile::tempdir().unwrap();

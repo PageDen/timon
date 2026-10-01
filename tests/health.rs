@@ -156,6 +156,7 @@ fn an_unhealthy_broker_answers_503_and_a_healthy_one_200() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_health_check_is_answered_locally_and_never_forwarded() {
     // The upstream here is a port with nothing on it. If the health request were

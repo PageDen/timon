@@ -6,6 +6,10 @@
 //! nothing of the first attempt spliced into it — and the conversation then stays
 //! where it was served.
 
+// Every test here starts a live broker, which identifies callers through
+// `/proc/net/tcp` and so runs on Linux only.
+#![cfg(target_os = "linux")]
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;

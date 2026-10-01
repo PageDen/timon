@@ -205,6 +205,7 @@ fn post(port: u16, path: &str, body: &str, grant: Option<&str>) -> String {
     String::from_utf8_lossy(&response).to_string()
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_grant_can_be_minted_and_then_used() {
     let root = tempfile::tempdir().unwrap();
@@ -233,6 +234,7 @@ fn a_grant_can_be_minted_and_then_used() {
     assert!(!used.contains("grant"), "no grant complaint: {used}");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_request_presenting_an_unknown_grant_is_refused_before_anything_is_spent() {
     let root = tempfile::tempdir().unwrap();
@@ -255,6 +257,7 @@ fn a_request_presenting_an_unknown_grant_is_refused_before_anything_is_spent() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_run_may_only_spend_the_accounts_it_was_granted() {
     let root = tempfile::tempdir().unwrap();
@@ -287,6 +290,7 @@ fn a_run_may_only_spend_the_accounts_it_was_granted() {
     assert!(used.contains("acct-not-here"));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn revoking_a_run_stops_its_requests() {
     let root = tempfile::tempdir().unwrap();
@@ -344,6 +348,7 @@ fn the_grant_never_reaches_the_provider() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn an_account_scope_refusal_is_not_reported_as_retryable() {
     // Found running it: a worker read 502 as "try again" and retried five times
