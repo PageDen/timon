@@ -1,0 +1,337 @@
+# Pipeline measurement registration — the gate after P6
+
+**Registered 2026-10-01 at commit `fc7a29d`, before any pipeline run was
+executed for it.** Written while the gates could still be argued with and before
+a single model call was made on their behalf.
+
+The plan's gating reads *"P3 → P4 (with the write-sandbox gate at P4.3) → P5 →
+P6 → **measure**."* P0–P6 are built and merged. This is that measurement.
+
+**It is not P8.** P8 compares Timon against single calls across a broad suite to
+decide whether the project is worth it. This gate asks a narrower question that
+has to be settled first: **does the planner path do what it claims, and does it
+stay inside the bounds it promises?** A pipeline that cannot be trusted to report
+its own results honestly cannot be evaluated against anything.
+
+## Why this document is stricter than P2's
+
+Five instruments in this project were wrong on first contact with real data. The
+sixth fault was mine and was not an instrument at all: the P2 cost gate was
+reported INCONCLUSIVE against the median of per-pair *ratios*, which was not the
+statistic P2's registration named, and which I chose after seeing the numbers.
+Applied to run 1 the same substitution would have concealed the ordering
+confound — the largest real effect that gate found.
+
+So every gate below names **the statistic, the estimator and the threshold**, not
+just the threshold. A figure that looks more informative once the data arrives is
+reported beside the registered one, never instead of it.
+
+## Unit
+
+**One run.** A run is one `timon run --execute` invocation: triage, and whatever
+route triage chose, including the planner call, every worker session, integration
+and verification.
+
+This is deliberately not P2's unit. P2 measured one worker session because the
+fast path *is* one session. The planner path's cost is the whole pipeline or it
+is nothing, and a per-session figure would hide the planner and judge calls that
+are exactly what the route adds. An arm reporting "one call" meaning anything
+else is not comparable.
+
+## The gates
+
+Four, in the order I would stop the project over them. Each can fail alone.
+
+| # | Gate | Statistic | Passes when |
+|---|---|---|---|
+| 1 | **Verdict honesty** | Count of runs reporting `done` whose claimed criteria do not all hold on the result branch, hand-checked | **Exactly zero** |
+| 2 | **Deliverables** | Median **fraction** of criteria established per task (established ÷ total), pipeline against a single strong call | Pipeline **≥** strong |
+| 3 | **Budget** | **Maximum** wall-clock overrun past `--budget-secs`, over every run | **Zero overruns** |
+| 4 | **Cost** | Median tokens per **established criterion**, pipeline against a single strong call | Ratio **≤ 2.0** |
+
+### Gate 1 is the one that matters, and why its threshold is zero
+
+Every other number in this project is downstream of the pipeline reporting its
+own results truthfully. A false `done` is not a quality problem, it is a
+corrupted instrument wearing the project's name — and this has already happened
+once: writing tasks ran read-only *and* were reported `done` with an empty
+branch. That was found by hand, not by any check.
+
+A rate threshold would be wrong here. One false `done` in twenty is not 95%
+success, it is a verifier that cannot be believed, because nobody knows which
+one. **Threshold zero, and a single occurrence stops the gate.**
+
+### Gate 2: why "criteria established" and not "tasks accepted"
+
+The planner path's whole claim is work a single call cannot do *well* — several
+interdependent deliverables. Scoring that pass/fail per task throws away the
+information: a strong call that writes two of three files correctly and a
+pipeline that writes three both score zero on an all-or-nothing measure, and the
+difference between them is the entire point of P3 and P4.
+
+So the statistic is a **count per task**, and the comparison is of **medians of
+each arm** — not of per-task ratios. That is the P2 lesson applied directly: a
+ratio of two small noisy counts is dominated by its denominator, and a task where
+the strong call establishes one criterion would swamp every other task in the
+suite.
+
+**The direction is registered as ≥, not >.** The pipeline costs more and takes
+longer; merely matching a single strong call on deliverables would be a real
+finding against the route, and I would rather record that honestly than discover
+I had registered a threshold the route could only clear by being lucky.
+
+**Amended 2026-10-01, before any run and with no data in existence**, from
+"median criteria established per task" to the median *fraction*. Writing the
+reporter exposed that the first version mixed incomparable units: the suite's
+tasks have 6, 7, 7, 5 and 2 criteria, so a count of 4 means four sevenths on p2
+and is impossible on p5, and a *perfect* score on p5 (2 of 2) would sit below a
+*failing* score on p2 (4 of 7) in the same median.
+
+The amendment is recorded rather than quietly applied because the distinction
+that matters is *when*. Changing a statistic before the data exists is fixing a
+mistake; changing it afterwards is what happened on the P2 cost gate and is the
+reason this document names estimators at all. Nothing had been run, so nothing
+about this choice could have been motivated by a result.
+
+### Gate 3: why the maximum and not the median
+
+`--budget-secs` is documented as *"the worst case **is** the budget rather than
+something larger that nobody worked out."* That is a claim about a bound. A
+median overrun of zero is consistent with a run taking four times its budget, so
+a median would not test the claim that was made. **The statistic is the maximum
+over all runs**, and the threshold is zero overruns.
+
+The run that exposed this originally took 14 minutes against a stated 4. Fixed in
+`src/budget.rs`; never measured end-to-end under load with concurrency.
+
+### Gate 4: why 2.0 and not 25%
+
+P2's margin was 25% because the fast path adds a broker hop and a grant round
+trip, none of which is model tokens, so it should be close to free. **None of
+that reasoning transfers.** The planner path spends a planner call, N worker
+sessions and a judge call where a single strong call spends one session. It
+*must* cost multiples. A 25%-style margin here would not be a strict gate, it
+would be an incoherent one.
+
+The question worth asking is therefore not cost per run but **cost per unit of
+work delivered**, which is why the denominator is established criteria. At 2.0
+the route may spend twice as much per delivered criterion as a single strong
+call and still pass — paid for by gate 2, where it has to deliver more.
+
+Fixed at 2.0 on 2026-10-01, before any run. It is a judgement and I will not
+pretend it is derived. What makes it honest is that it is written down now, with
+its reasoning, where a later argument can be had against it.
+
+## The verifier cannot score its own gate
+
+P5's verifier decides `done` / `repairable` / `blocked` using a model call
+against criteria another model call wrote. Scoring this gate with it would be
+circular, and gate 1 exists precisely to test it.
+
+So ground truth is established two ways, neither of them the verifier:
+
+1. **Mechanically.** `eval/score-criteria.py` checks each registered criterion
+   against the result branch by string and path, the same four shapes
+   `src/acceptance.rs` supports: a file exists, contains text, is absent, or no
+   longer contains text. No model judges anything.
+2. **By hand, for every `done`.** Gate 1's threshold is zero, so every `done`
+   verdict is read against its branch by a person before the gate reports. A rate
+   hides which case broke, and twice on the P2 gate the case that broke was the
+   instrument.
+
+Criteria for the suite are **written into the suite file in advance**, not taken
+from whatever the planner produces at runtime. A planner that writes itself an
+easy criterion would otherwise score full marks — and the planner has already
+done this once, producing `TESTING.md contains "test"`, which is true of any file
+with that name.
+
+## Arms
+
+Matched on goal text, repository state, tools and permissions.
+
+1. **Pipeline** — `timon run --execute --allow-planner --route planner`.
+2. **Single strong call** — one `codex exec` session, strong model, same goal.
+3. **Single cheap call** — same, cheap model. Included to keep the comparison
+   honest in the other direction: if a cheap call establishes as many criteria as
+   the pipeline on these tasks, the suite is too easy and the gate says so.
+
+**Arm order is randomised per task.** On the P2 gate, Timon always ran first and
+the direct call second, and the result was a median ratio of 1.495 that fell to
+1.129 once order was randomised. That artefact would have sent someone hunting a
+50% overhead that did not exist. It is the largest false effect this project has
+measured and it came from arm ordering alone.
+
+**Repeats: 3.** P2 learned that 2 could not see past the noise and went to 5, but
+a pipeline run costs roughly five worker sessions rather than one, so 5 repeats
+across 3 arms is not affordable against two accounts. **3 is registered as
+possibly too few**: if the interquartile ranges of the two arms overlap on gates
+2 or 4, the gate reports **INCONCLUSIVE** rather than printing a number. It does
+not get upgraded to a pass by the margin being technically cleared.
+
+## Stopping rules, fixed now
+
+- **Spend approved by Chris, per account, before any run.** Nothing below is
+  executed without it.
+- An arm that passes its per-account allowance **stops for a decision**. It does
+  not continue and it does not quietly switch accounts.
+- **One false `done` stops the gate** (gate 1), before the other three are
+  reported. There is no point measuring deliverables against a verdict that is
+  not trustworthy.
+- An instrument that disagrees with a hand-checked sample on any task stops the
+  run until the instrument is fixed. **Instruments are validated on saved output
+  first, never on the run they are scoring.** Five have been wrong on first
+  contact.
+- Every transcript and every result branch is kept. Three faults on the P2 gate
+  cost nothing to fix because the transcripts had survived; re-scoring is free
+  and re-spending is not.
+
+## What this will cost, as an estimate rather than a figure
+
+A pipeline run on these tasks is one planner call, roughly three worker sessions
+and one judge call. P2's median session was ~3,200 tokens, but those were
+single-turn read-only questions and these are multi-file writing tasks, so that
+number is a floor and not a prediction.
+
+| | runs | estimate |
+|---|---|---|
+| Pipeline | 5 tasks × 3 repeats = 15 | ~50–75k tokens each → **0.75–1.1M** |
+| Strong | 15 | ~15k each → **~225k** |
+| Cheap | 15 | ~10k each → **~150k** |
+
+**Order 1.0–1.5M tokens.** Stated as a range because the per-session figure it
+rests on was measured on much smaller work. The P2 gate spent 113,355 tokens and
+moved a 7-day quota window by nothing visible; this is roughly ten times that, so
+it may be the first run where quota percentage is a usable unit at all.
+
+**Account state at registration:** two active Pro accounts. `acct2` at 22% (resets
+4 Oct), `acct3` on `prolite` at ~2% (resets 5 Oct). Whether `prolite` serves the
+strong model is **unverified** and must be settled before the strong arm runs,
+because the models endpoint is known to lie about exactly this.
+
+## The attribution limit, stated rather than discovered
+
+Quota moves whenever anyone uses an account. A window that drops during a run is
+not that run's spend unless the account was otherwise idle. Either an account is
+reserved and quiet for the duration, or the numbers are reported as an upper
+bound with the contamination named.
+
+## What this gate will not establish
+
+- **Whether Timon is worth it.** That is P8, with a broader suite and human
+  review effort included. This gate only asks whether the route does what it
+  says inside the bounds it promises.
+- **Anything about work whose requirements are not file-shaped.** Criteria are
+  mechanically checkable by construction, which is `src/acceptance.rs`'s standing
+  limit, not a property of this suite.
+- **Anything about repair.** P6 is now one pass and a developer decision, so
+  there is no repair loop left to measure. A `repairable` verdict is an output
+  here, not a trigger.
+- **Cost causes.** The P2 gate found per-pair token figures varying by a factor
+  of eight at identical turn counts, in bands both arms occupied equally, with no
+  mechanism established. That variance is still unexplained and will be present
+  here.
+
+## The instrument, validated before any spend
+
+`eval/score-criteria.py` was written and validated with this document, on
+synthetic trees, at zero spend. Five instruments in this project were wrong on
+first contact with real data; none of them had been pointed at a case whose
+answer was known in advance.
+
+**15/15 self-tests pass** (`--self-test`), covering all four criterion shapes in
+both directions, case folding, and `exact`.
+
+One of them is the trap this checker exists to avoid: **`absent_text` on a
+missing file fails rather than vacuously passing.** Read the other way,
+"accounts-public.md does not contain acct2" is trivially true of a file nobody
+wrote, and p4's two redaction criteria would have scored as passes for a worker
+that skipped the deliverable entirely. That is the shape of every instrument
+fault here so far — a check satisfied by the absence of the work.
+
+Then the three cases whose scores were known before running them:
+
+| Tree | Expected | Scored |
+|---|---|---|
+| This repository, no deliverable written | 0 | **0/27** |
+| Hand-built correct answers | 27 | **27/27** |
+| Hand-built plausible-but-flawed | partial | **20/27** |
+
+The third is the one that shows the criteria discriminate, which is the P5 lesson
+applied: a criterion that passes anything measures nothing. It was built as the
+output a single call plausibly produces, and the checker isolated exactly the
+four failures the suite was designed to separate — the index that never named
+the file it was told to link, the summary that said "12 hours" without ever
+computing 43200, one of three independent files dropped, and one of two account
+names left unredacted.
+
+**0, 20 and 27 on known inputs is the range this gate needs.** An instrument that
+only ever reports full marks or zero cannot report a difference between arms.
+
+## The runner and the reporter, also validated before any spend
+
+Both exist. Neither has made a model call.
+
+**`eval/run-gate-p6.py`** refuses to start unless `score-criteria.py
+--self-test` passes, and refuses to start without an explicit
+`--ceiling-tokens`: a default ceiling would be the script approving its own
+spend. `--account` is required and pinned, because an unpinned run lets the
+broker pick, and the broker picks the healthiest account — possibly the one a
+developer is mid-session on.
+
+**The single-call arms use the pipeline's own write-worker command**, `codex
+exec -m MODEL -s workspace-write --skip-git-repo-check -` with the task on
+stdin, started in a throwaway worktree off HEAD. Not an approximation of it. A
+single call run read-only, or denied the write sandbox, would lose every writing
+criterion before the comparison began, and the gate would be measuring its own
+harness rather than the arms.
+
+### Arm order is counterbalanced, not merely randomised
+
+Independent shuffling per pair does not balance at this sample size. The first
+implementation, on the registered seed, put the pipeline arm **last in 8 of 15
+pairs and second in 2**. Whoever runs later inherits a warm prompt cache, so a
+lopsided draw reintroduces a weaker form of the exact confound that made run 1
+of the P2 gate report 1.495 against a true 1.129.
+
+The design is therefore counterbalanced first and randomised second: every arm
+occupies every position **exactly five times** across the fifteen pairs, and the
+order of the blocks is shuffled so position is still not predictable from where a
+task sits in the schedule. Verified at every suite size, with the imbalance never
+exceeding one where the count is not a multiple of three.
+
+### The reporter, on five fixtures whose answers were known first
+
+| Fixture | Expected | Reported |
+|---|---|---|
+| Clean separation | all gates pass | **all pass** |
+| A `done` verdict with unmet criteria | gate 1 fails and stops | **FAIL, exit 1, later gates not computed** |
+| High variance, overlapping IQRs | gates 2 and 4 inconclusive | **INCONCLUSIVE on both** |
+| Pipeline over its budget | gate 3 fails on the maximum | **FAIL, worst +130.0s** |
+| p5 sent to the planner | control fails | **FAIL** |
+
+It also **refuses malformed records** rather than computing over them — a count
+outside 0..total cannot come from the checker, so it means rows were mis-paired
+or a total was lost upstream. That guard exists because a deliberately broken
+fixture printed `-1/2` and the reporter scored it without complaint. Five
+instruments here have been wrong on first contact with real data and every one
+of them reported a number rather than refusing.
+
+## What is left before this gate runs
+
+**Only your approval.** The suite, the checker, the runner and the reporter are
+built and validated at zero spend. What is needed from Chris:
+
+- Which account the gate may spend, and whether the strong arm pays from a
+  different one.
+- A ceiling per account. The stop rule is already enforced in the runner:
+  reaching it stops for a decision, does not continue, and does not switch
+  accounts.
+- Whether the account is reserved and quiet for the duration. This is
+  measurement rather than budget — concurrent use makes the quota figures an
+  upper bound with the contamination named.
+
+And one fact to settle first: **whether `prolite` on `acct3` serves the strong
+model.** The strong arm is meaningless if it silently runs on something else,
+and the models endpoint is known to lie about exactly this.
+
+`--dry-run` prints the full schedule and arm order and spends nothing.

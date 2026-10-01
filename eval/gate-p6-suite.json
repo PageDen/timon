@@ -1,0 +1,191 @@
+{
+  "registered": "2026-10-01",
+  "gate": "P6",
+  "purpose": "The pipeline gate. Every task has several deliverables, at least one criterion that can only be satisfied by having read another deliverable, and acceptance decided by path and string checks rather than by a judgement.",
+  "why_mechanical": "A model judging a model is another instrument to validate before it can be trusted, and this gate exists partly to test the model-based verifier. Criteria here are settled by reading the result branch, so the instrument stays out of the argument.",
+  "ground_truth_taken": "2026-10-01 at commit fc7a29d, by reading src/broker/select.rs, src/broker/refresh.rs, src/broker/quota.rs, src/broker/grant.rs, src/budget.rs, src/qualify.rs, src/verify.rs and src/run/record.rs directly. Recorded so a later disagreement is settled against the repository rather than against anyone's memory.",
+  "criteria_are_fixed": "Written here in advance. Criteria the planner invents at runtime are recorded but never scored, because a planner that writes itself an easy criterion would otherwise score full marks. It has already done this once: 'TESTING.md contains test', true of any file with that name.",
+  "contains_folds_case": "A 'contains' criterion is matched case-insensitively. The tasks ask for prose, and whether a sentence began with a capital is not what any gate here is about. Criteria that name a code identifier are matched case-sensitively and are marked exact: true.",
+  "tasks": [
+    {
+      "id": "p1",
+      "kind": "dependent",
+      "goal": "In docs/selection.md, document the three things that decide which pooled account serves a request, in the order the broker applies them, naming each one. Then write docs/index.md, a short index that links to the selection document by its filename.",
+      "why": "The second deliverable cannot be written without knowing the first one's filename, so a worker that ignores its dependency fails criterion 6 while passing the rest. The three names are a fact of src/broker/select.rs, not a judgement.",
+      "criteria": [
+        {
+          "kind": "file_exists",
+          "path": "docs/selection.md"
+        },
+        {
+          "kind": "contains",
+          "path": "docs/selection.md",
+          "value": "continuity"
+        },
+        {
+          "kind": "contains",
+          "path": "docs/selection.md",
+          "value": "capability"
+        },
+        {
+          "kind": "contains",
+          "path": "docs/selection.md",
+          "value": "headroom"
+        },
+        {
+          "kind": "file_exists",
+          "path": "docs/index.md"
+        },
+        {
+          "kind": "contains",
+          "path": "docs/index.md",
+          "value": "selection.md",
+          "dependency": true
+        }
+      ]
+    },
+    {
+      "id": "p2",
+      "kind": "dependent",
+      "goal": "In docs/limits.md, list REFRESH_SKEW_SECS, CACHE_SECS and MAX_LIFETIME_SECS with each value in seconds as the code defines it, written as a numeral. Then write docs/limits-summary.md naming which of the three is the largest and giving its value in seconds as a numeral.",
+      "why": "The summary's number can only come from having read the three values, so it is a dependency that a plausible-sounding guess fails. 43200 is MAX_LIFETIME_SECS expressed in seconds; a worker that copies '12 * 3600' forward has not answered the question asked.",
+      "criteria": [
+        {
+          "kind": "file_exists",
+          "path": "docs/limits.md"
+        },
+        {
+          "kind": "contains",
+          "path": "docs/limits.md",
+          "value": "300"
+        },
+        {
+          "kind": "contains",
+          "path": "docs/limits.md",
+          "value": "60"
+        },
+        {
+          "kind": "contains",
+          "path": "docs/limits.md",
+          "value": "43200"
+        },
+        {
+          "kind": "file_exists",
+          "path": "docs/limits-summary.md"
+        },
+        {
+          "kind": "contains",
+          "path": "docs/limits-summary.md",
+          "value": "MAX_LIFETIME_SECS",
+          "exact": true,
+          "dependency": true
+        },
+        {
+          "kind": "contains",
+          "path": "docs/limits-summary.md",
+          "value": "43200",
+          "dependency": true
+        }
+      ]
+    },
+    {
+      "id": "p3",
+      "kind": "independent",
+      "goal": "Write three files. In docs/checks.md, state as a numeral how many sandbox checks the qualify module defines. In docs/dimensions.md, state as a numeral how many dimensions the verifier has. In docs/bases.md, name every variant of the Base enum in the run record.",
+      "why": "Three deliverables with no dependency between them, which is what P4's concurrency is for. This is the drop-one test: a single call asked for three files commonly returns two. Counts are 9 checks and 5 dimensions; Base has four variants, of which HeadWithUncaptured is the one a hurried reading misses.",
+      "criteria": [
+        {
+          "kind": "file_exists",
+          "path": "docs/checks.md"
+        },
+        {
+          "kind": "contains",
+          "path": "docs/checks.md",
+          "value": "9"
+        },
+        {
+          "kind": "file_exists",
+          "path": "docs/dimensions.md"
+        },
+        {
+          "kind": "contains",
+          "path": "docs/dimensions.md",
+          "value": "5"
+        },
+        {
+          "kind": "file_exists",
+          "path": "docs/bases.md"
+        },
+        {
+          "kind": "contains",
+          "path": "docs/bases.md",
+          "value": "Snapshot",
+          "exact": true
+        },
+        {
+          "kind": "contains",
+          "path": "docs/bases.md",
+          "value": "HeadWithUncaptured",
+          "exact": true
+        }
+      ]
+    },
+    {
+      "id": "p4",
+      "kind": "dependent",
+      "goal": "In docs/accounts.md, document the two active pooled accounts by name, acct2 and acct3, with what each is for. Then write docs/accounts-public.md: the same document with every account name removed, suitable for sharing outside the team.",
+      "why": "Exercises the two negative criterion shapes, which nothing else in the suite does, and the redaction is a real dependency rather than a contrived one. The characteristic failure is redacting one name and forgetting the other, which criteria 4 and 5 separate.",
+      "criteria": [
+        {
+          "kind": "file_exists",
+          "path": "docs/accounts.md"
+        },
+        {
+          "kind": "contains",
+          "path": "docs/accounts.md",
+          "value": "acct2"
+        },
+        {
+          "kind": "file_exists",
+          "path": "docs/accounts-public.md"
+        },
+        {
+          "kind": "absent_text",
+          "path": "docs/accounts-public.md",
+          "value": "acct2",
+          "dependency": true
+        },
+        {
+          "kind": "absent_text",
+          "path": "docs/accounts-public.md",
+          "value": "acct3",
+          "dependency": true
+        }
+      ]
+    },
+    {
+      "id": "p5",
+      "kind": "control",
+      "goal": "In docs/concurrency.md, state as a numeral the default number of workers the budget module runs at once.",
+      "why": "One deliverable, answerable in a sentence. It is the over-escalation control and is the one task the pipeline arm runs WITHOUT --route planner, so triage decides. Registered expectation: triage does not choose the planner. If it does, the planner path is being handed work a cheap call does, which is the expensive mistake P2's routing suite exists to catch.",
+      "expect_route_not": "planner",
+      "criteria": [
+        {
+          "kind": "file_exists",
+          "path": "docs/concurrency.md"
+        },
+        {
+          "kind": "contains",
+          "path": "docs/concurrency.md",
+          "value": "4"
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "tasks": 5,
+    "criteria": 27,
+    "dependency_criteria": 5,
+    "note": "A per-arm score is a count out of 27. Gate 2 compares the medians of the per-task counts, not this total, because a total lets one task with many criteria dominate."
+  }
+}
