@@ -151,6 +151,25 @@ pub fn authorise(
 ///
 /// Called on every path out, including failure. A grant left live after its run
 /// has stopped is authority nobody is watching.
+/// The terminal status for a run that has stopped running.
+///
+/// `Status::Cancelled` existed and nothing ever set it: every path out of
+/// execution settled `Finished`, so a run stopped by Ctrl-C or by `timon runs
+/// cancel` was recorded as having completed. `timon runs list` then printed
+/// `finished` beside work nobody received, which is the kind of report this
+/// project exists not to produce.
+///
+/// Public so the rule can be tested on its own, like `refresh::apply` and
+/// `watch::look`. Every settle path out of execution goes through it, so a
+/// future path that forgets is the thing to watch for, not the rule itself.
+pub fn terminal(cancel: &std::sync::atomic::AtomicBool) -> Status {
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        Status::Cancelled
+    } else {
+        Status::Finished
+    }
+}
+
 pub fn revoke(broker: &str, run_id: &str) {
     let body = serde_json::json!({ "run_id": run_id, "revoke": true }).to_string();
     if let Err(error) = post(broker, "/_timon/grant", &body) {
@@ -343,8 +362,8 @@ pub async fn execute(
     revoke(&plan.broker, &run.id);
 
     let (status, detail) = match &outcome {
-        Ok(_) => (Status::Finished, None),
-        Err(why) => (Status::Finished, Some(why.clone())),
+        Ok(_) => (terminal(&plan.cancel), None),
+        Err(why) => (terminal(&plan.cancel), Some(why.clone())),
     };
     runs.settle(&run.id, status, now, detail.as_deref())
         .map_err(ExecuteError::Store)?;
@@ -426,7 +445,7 @@ pub async fn execute_planned(
         Ok(output) => output,
         Err(why) => {
             revoke(&plan.broker, &run.id);
-            let _ = runs.settle(&run.id, Status::Finished, now, Some(&why));
+            let _ = runs.settle(&run.id, terminal(&plan.cancel), now, Some(&why));
             return Err(ExecuteError::Planning(why));
         }
     };
@@ -437,7 +456,7 @@ pub async fn execute_planned(
         Err(error) => {
             revoke(&plan.broker, &run.id);
             let detail = error.to_string();
-            let _ = runs.settle(&run.id, Status::Finished, now, Some(&detail));
+            let _ = runs.settle(&run.id, terminal(&plan.cancel), now, Some(&detail));
             return Err(ExecuteError::Planning(detail));
         }
     };
@@ -496,9 +515,11 @@ pub async fn execute_planned(
     revoke(&plan.broker, &run.id);
     let _ = runs.settle(
         &run.id,
-        Status::Finished,
+        terminal(&plan.cancel),
         now,
-        if report.graph.not_run.is_empty() {
+        if plan.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            Some("the run was cancelled")
+        } else if report.graph.not_run.is_empty() {
             None
         } else {
             Some("some tasks did not run")

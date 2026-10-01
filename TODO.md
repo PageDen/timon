@@ -84,13 +84,6 @@ only in the safe one; fixing it means guessing at difficulty, which is what send
 the wrong work to the wrong place. Recorded in `eval/registration-p2.md` as a
 standing disagreement rather than reconciled.
 
-**Cancellation from `timon runs cancel` does not yet reach a running worker.**
-Ctrl-C does: the executor watches a flag and kills the worker's process group,
-and the scheduler stops starting new tasks. What is still missing is the path
-from a *separate* `timon runs cancel` invocation to a worker in another process —
-the record moves to `cancelling` and the grant is revoked, so no new request is
-authorised, but the running turn continues. Closing it needs the run to watch its
-own record, or a signal addressed to it.
 
 **Model policy cannot refuse on capability.** P1.3 substitutes the model and says
 so, but a request asking for something the assigned model cannot do is not
@@ -116,6 +109,28 @@ worker supervision could break this without touching anything that looks like
 sandboxing.
 
 ## Operational
+
+**Fixed 2026-10-01: a cancel from another terminal now reaches the worker.**
+`timon runs cancel` wrote `cancelling` to the record and revoked the grant, so
+nothing new was authorised, but the turn already running carried on in a process
+that never read its own row. Ctrl-C always worked, because that flag is set in
+the same process. The run now polls its own record once a second and sets the
+same flag, so killing the worker's process group and declining further tasks
+needed no change. Verified end to end with a worker that sleeps instead of
+calling a model: the process dies within a second of the cancel.
+
+A read failure never cancels. `look` returns *unreadable* rather than *cancel*
+when the record cannot be read, because a watcher that cancelled on a failed
+read would turn brief lock contention into a killed run — a worse failure than
+the one it fixes.
+
+**Fixed with it: a cancelled run is no longer recorded as `finished`.**
+`Status::Cancelled` existed and nothing set it. All four paths out of execution
+settled `Finished`, so `timon runs list` printed `finished` beside work nobody
+received — including after Ctrl-C, which had always been reported that way. Found
+by running the cancellation for real, not by a test, which is why there is a test
+for it now.
+
 
 **Fixed 2026-09-28: the broker has its own account and the store is not
 readable by workers.** It ran as `workbench`, the same login as the workers, and
