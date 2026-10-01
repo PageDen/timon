@@ -32,16 +32,33 @@ it chose and why. When you are happy with the route:
 timon run "Write docs/overview.md describing this project" --execute
 ```
 
-The result is a branch. Review it like any other:
+The result is a branch. `timon runs show <id>` repeats its name and the three
+things you can do with it:
+
+```sh
+timon runs diff <id>            # what it changed, as a summary
+timon runs diff <id> --full     # the whole diff
+timon runs accept <id>          # merge it into the current branch
+timon runs discard <id>         # delete its branches
+```
+
+`accept` refuses when your working tree has uncommitted changes, rather than
+mixing them into the run's work, and it never pushes. `discard` removes the
+run's own worktrees first and deletes only branches belonging to that run.
+
+The diff is taken against the commit the run **started from**, not your current
+HEAD — otherwise work you committed since the hand-off began would be
+attributed to the run.
+
+Plain git works too, if you prefer:
 
 ```sh
 git branch --list 'timon/*'
-git log --stat timon/run-.../result
 git diff HEAD..timon/run-.../result
-git merge timon/run-.../result      # if you want it
+git merge timon/run-.../result
 ```
 
-To throw it away, delete the branch. Your own files were never modified.
+Either way, your own files are untouched until you accept.
 
 ## Reading the verdict
 

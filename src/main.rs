@@ -217,6 +217,111 @@ fn qualify_accept(args: QualifyAcceptArgs) -> Result<u8> {
     Ok(0)
 }
 
+/// Looks up one run and the branch it produced.
+fn produced_for(
+    args: &RunsReviewArgs,
+) -> Result<Option<(timon::run::record::Run, timon::run::review::Produced)>> {
+    let runs = open_runs(args.store.clone())?;
+    let run = match runs.get(&args.id) {
+        Ok(run) => run,
+        Err(error) => {
+            eprintln!("timon: {error}");
+            return Ok(None);
+        }
+    };
+    match timon::run::review::produced(&run) {
+        Ok(produced) => Ok(Some((run, produced))),
+        Err(why) => {
+            eprintln!("timon: {why}");
+            Ok(None)
+        }
+    }
+}
+
+/// What a run changed.
+fn runs_diff(args: RunsReviewArgs) -> Result<u8> {
+    let Some((_run, produced)) = produced_for(&args)? else {
+        return Ok(1);
+    };
+    println!("branch  {}", produced.branch);
+    if let Some(base) = &produced.base {
+        println!("from    {base}");
+    }
+    println!();
+    match timon::run::review::diff(&produced, args.full) {
+        Ok(diff) if diff.trim().is_empty() => {
+            println!("No changes against the commit the run started from.");
+        }
+        Ok(diff) => {
+            println!("{diff}");
+            if !args.full {
+                println!();
+                println!("`timon runs diff {} --full` for the whole diff.", args.id);
+            }
+        }
+        Err(why) => {
+            eprintln!("timon: {why}");
+            return Ok(1);
+        }
+    }
+    Ok(0)
+}
+
+/// Merges a run's work into the current branch.
+fn runs_accept(args: RunsReviewArgs) -> Result<u8> {
+    let Some((_run, produced)) = produced_for(&args)? else {
+        return Ok(1);
+    };
+    match timon::run::review::accept(&produced) {
+        Ok(output) => {
+            if !output.trim().is_empty() {
+                println!("{}", output.trim_end());
+            }
+            println!();
+            println!("Merged {} into the current branch.", produced.branch);
+            println!(
+                "Nothing was pushed. `timon runs discard {}` removes the branch \
+                 once you are done with it.",
+                args.id
+            );
+            Ok(0)
+        }
+        Err(why) => {
+            eprintln!("timon: {why}");
+            Ok(1)
+        }
+    }
+}
+
+/// Throws a run's work away.
+fn runs_discard(args: RunsReviewArgs) -> Result<u8> {
+    let runs = open_runs(args.store.clone())?;
+    let run = match runs.get(&args.id) {
+        Ok(run) => run,
+        Err(error) => {
+            eprintln!("timon: {error}");
+            return Ok(1);
+        }
+    };
+    match timon::run::review::discard(&run) {
+        Ok(deleted) => {
+            for branch in &deleted {
+                println!("deleted {branch}");
+            }
+            println!();
+            println!(
+                "{} branch(es) gone. Your own files were never modified by the run.",
+                deleted.len()
+            );
+            Ok(0)
+        }
+        Err(why) => {
+            eprintln!("timon: {why}");
+            Ok(1)
+        }
+    }
+}
+
 /// Fills in from the config whatever the flags left unsaid.
 ///
 /// Flags win, always. A setting absent from both falls back to the built-in,
@@ -669,6 +774,23 @@ enum RunsCommand {
     Cancel(RunsCancelArgs),
     /// Mark runs left behind by a stopped orchestrator, and report them
     Recover(RunsRecoverArgs),
+    /// What a hand-off changed, as a diff against where it started
+    Diff(RunsReviewArgs),
+    /// Merge a hand-off's work into the current branch
+    Accept(RunsReviewArgs),
+    /// Delete a hand-off's branches, keeping your own files untouched
+    Discard(RunsReviewArgs),
+}
+
+#[derive(Args)]
+struct RunsReviewArgs {
+    /// The run to act on.
+    id: String,
+    #[arg(long)]
+    store: Option<PathBuf>,
+    /// Show the whole diff rather than a summary. Only for `diff`.
+    #[arg(long)]
+    full: bool,
 }
 
 #[derive(Args)]
@@ -1323,6 +1445,9 @@ fn run() -> Result<u8> {
         Command::Status => return status(),
         Command::Qualify(QualifyCommand::Status) => return qualify_status(),
         Command::Qualify(QualifyCommand::Accept(args)) => return qualify_accept(args),
+        Command::Runs(RunsCommand::Diff(args)) => return runs_diff(args),
+        Command::Runs(RunsCommand::Accept(args)) => return runs_accept(args),
+        Command::Runs(RunsCommand::Discard(args)) => return runs_discard(args),
         Command::Runs(RunsCommand::Cancel(args)) => return runs_cancel(args),
         Command::Runs(RunsCommand::Recover(args)) => return runs_recover(args),
     };
@@ -2251,6 +2376,23 @@ fn runs_show(args: RunsShowArgs) -> Result<u8> {
                 for reason in &decision.reasons {
                     println!("              · {} ({})", reason.detail, reason.rule);
                 }
+            }
+            // What to do next, because a run's branch name is otherwise
+            // something the developer has to go and find.
+            match timon::run::review::produced(&run) {
+                Ok(produced) => {
+                    println!();
+                    println!("  branch      {}", produced.branch);
+                    println!();
+                    println!("  timon runs diff {}      what it changed", run.id);
+                    println!("  timon runs accept {}    merge it", run.id);
+                    println!("  timon runs discard {}   throw it away", run.id);
+                }
+                Err(timon::run::review::ReviewError::NothingProduced) => {
+                    println!();
+                    println!("  branch      none — nothing was produced, or it has been discarded");
+                }
+                Err(_) => {}
             }
         }
     }
