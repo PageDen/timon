@@ -181,3 +181,36 @@ fn the_prompt_tells_the_planner_that_depends_on_holds_labels() {
         "and say what happens, so the cost is visible to the planner"
     );
 }
+
+#[test]
+fn the_prompt_asks_for_criteria_that_discriminate_without_being_over_strict() {
+    // Both failures were observed on 2026-10-01, in that order.
+    //
+    // First an over-strict criterion: the planner wrote a task saying "with
+    // clear link text" and a criterion demanding the link read exactly
+    // "[ARCH.md](ARCH.md)". Correct work was reported repairable.
+    //
+    // Then, after asking for the weakest criterion, a useless one: "TESTING.md
+    // contains 'test'" — true of a file called TESTING.md whatever is in it.
+    //
+    // So the prompt has to ask for both properties, and name both failures.
+    let prompt = plan_prompt("goal", &Limits::default());
+
+    assert!(
+        prompt.contains("fail if the task was not done"),
+        "it must ask for discriminating power: {prompt}"
+    );
+    assert!(
+        prompt.contains("not fail work that is correct"),
+        "and for not being over-strict"
+    );
+    // The two worked examples, because an abstract instruction did not land.
+    assert!(
+        prompt.contains("TESTING.md"),
+        "the useless-criterion example"
+    );
+    assert!(
+        prompt.contains("[FILE.md](FILE.md)"),
+        "the over-strict-criterion example"
+    );
+}

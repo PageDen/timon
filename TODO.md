@@ -46,6 +46,18 @@ mean executing arbitrary commands in somebody's checkout on the strength of a
 convention, so an undeclared project gets *not applicable* rather than a
 silent pass.
 
+## Watch this
+
+**Criteria are only as good as the planner's wording, and the lever is a
+prompt.** Two failures on 2026-10-01, in order: an over-strict criterion that
+reported correct work as repairable, then — after asking for the weakest
+criterion — a useless one ("TESTING.md contains 'test'", true of any file with
+that name). The prompt now asks for both properties with both failures as worked
+examples, and a third run produced criteria that discriminate without being
+over-strict. Three runs is not a measurement. If it recurs, the next step is a
+critique pass: one model call that checks a plan's criteria against its own task
+text before any work runs, at the cost of one more slice of the budget.
+
 ## Known limits, accepted for now
 
 **Triage misses a comma-separated list of deliverables.** "Write A, B, and C"

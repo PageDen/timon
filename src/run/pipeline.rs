@@ -126,8 +126,19 @@ claims about files rather than descriptions of quality — \
 `{{\"kind\":\"file_contains\",\"path\":\"README.md\",\"text\":\"NOTES.md\"}}`, \
 `{{\"kind\":\"file_absent\",\"path\":\"old.rs\"}}`, or \
 `{{\"kind\":\"file_omits\",\"path\":\"lib.rs\",\"text\":\"deprecated_fn\"}}`. Paths are \
-relative to the repository. A task with no checkable criteria gets none, and its \
-result will be reported as unverified rather than as done.\n\n\
+relative to the repository.\n\n\
+A criterion has to do two things at once, and both are easy to lose.\n\n\
+It must **fail if the task was not done**. \
+`{{\"kind\":\"file_contains\",\"path\":\"TESTING.md\",\"text\":\"test\"}}` is useless: a \
+file called TESTING.md contains the word \"test\" whatever is in it. Check \
+something only the finished work would contain — a command that has to be run, \
+the name of the thing being documented, the identifier that was added.\n\n\
+It must **not fail work that is correct**. A criterion stricter than the task is \
+one the work can fail while being right. If the task says to link to a file with \
+clear link text, check the filename appears — not that the link reads exactly \
+\"[FILE.md](FILE.md)\", which would fail the clear link text you asked for.\n\n\
+A task with no checkable criteria gets none, and its result is reported as \
+unverified rather than as done. That is better than a criterion that is wrong.\n\n\
 At most {} tasks, at most {} deep. Fewer where fewer will do.\n\n\
 Reply with JSON only:\n\
 {{\"tasks\":[{{\"label\":\"short-name\",\"task\":\"the complete task\",\"depends_on\":[],\"access\":\"read\",\"acceptance\":[{{\"kind\":\"file_exists\",\"path\":\"x.md\"}}]}}],\"notes\":\"why you split it this way\"}}",
