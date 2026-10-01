@@ -168,6 +168,15 @@ They still cannot exceed the host limit, which is provisioned and not theirs to
 touch. This is fairness against runaway work, not a boundary against someone
 determined to take more, and nothing here should be read as the latter.
 
+**Settled 2026-10-01: both candidate models serve on `acct3`.** `gpt-5.6-luna`
+and `gpt-5.5` were each called once through the broker pinned to `acct3` and both
+answered, for 12,618 tokens total. The capability worry from the `go` plan does
+not apply to either on this account today. The plan *name* could not be read from
+a developer login, because the store is `0700` owned by `timon-broker` — the
+service-account fix working as intended. Which of the two is the stronger model
+is still unknown and is not safe to assume: the pipeline gate's runner requires
+both names explicitly and refuses to start if they are equal.
+
 **`acct3`'s plan is still settling.** It reported `go`, then `plus` with a 5-hour
 window, then `prolite` with a 7-day one, over about twenty minutes on
 2026-09-28. Each change invalidated its session; the broker now recovers from

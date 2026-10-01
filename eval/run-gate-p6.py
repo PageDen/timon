@@ -134,10 +134,18 @@ def run_single(task, arm, model, args, out):
     }
 
 
-def run_pipeline(task, args, out):
+def run_pipeline(task, rep, args, out):
     """The whole route: triage, planner, workers, integration, verification."""
-    run_out = Path(out) / f"{task['id']}-pipeline"
-    run_out.mkdir(parents=True, exist_ok=True)
+    # Keyed by repeat. Sharing one directory across repeats overwrote
+    # stdout.json and stderr.log each time, so stage one kept only the last of
+    # three reports. The token sum survived only because it was already scoped
+    # by run id.
+    run_out = Path(out) / f"{task['id']}-{rep}-pipeline"
+    # 0700: a worker refuses an output directory that group or others can read,
+    # which is right — its output can contain whatever it was working on. The
+    # default umask here gives 0755 and the run fails before it starts.
+    run_out.mkdir(parents=True, exist_ok=True, mode=0o700)
+    run_out.chmod(0o700)  # exist_ok could have found one left at 0755
     command = [
         args.timon, "run", task["goal"], "--execute",
         "--store", str(Path(out) / "runs.sqlite"),
@@ -162,23 +170,50 @@ def run_pipeline(task, args, out):
         report = json.loads(done.stdout)
     except json.JSONDecodeError:
         report = {}
-    run = report.get("run", {})
-    branch = run.get("branch")
+    # Two shapes, because two routes. The single-worker route wraps its record
+    # as {"run": {...branch...}}; the planner route emits a flat object with
+    # `result_branch` at the top level. Reading only the first gave branch=None
+    # for every planner run, so nothing was checked out and stage one recorded
+    # 0 of 6 three times while the branches on disk each held 6 of 6. A
+    # confident wrong number, not a refusal — the seventh instrument fault here
+    # and the worst-shaped one.
+    run = report.get("run") if isinstance(report.get("run"), dict) else report
+    branch = run.get("branch") or report.get("result_branch")
+    if branch is None and report:
+        print(f"    no result branch in the report for {task['id']}-{rep}; "
+              f"keys were {sorted(report)}", flush=True)
 
     # Score the result branch, never the pipeline's own verdict about it.
     established, total, detail = 0, len(task["criteria"]), []
     if branch:
-        tree = Path(out) / f"{task['id']}-pipeline-result"
+        tree = Path(out) / f"{task['id']}-{rep}-pipeline-result"
         git("worktree", "add", "--detach", str(tree), branch)
         rows = score_tree(args.suite_data, tree, {task["id"]})
         established, total, detail = rows[0]["established"], rows[0]["total"], rows[0]["detail"]
         drop_worktree(tree)
 
     # Tokens across every session the route spent: planner, workers, judge.
+    #
+    # Scoped to this run's own directory and to the two transcript names codex
+    # writes, rather than everything beneath the output root. Two reasons, both
+    # found by probing a real run before spending anything on the gate:
+    #
+    # A worker's worktree is a full checkout of the repository, so a glob for
+    # `*.log` and `*.txt` under the output root walks it. Nothing tracked here
+    # matches today, but a task that writes a log file — which these tasks
+    # plausibly could — would have its own output counted as model tokens.
+    #
+    # And a glob over the output root sums every run that has ever used it. The
+    # probe read 12,618 tokens across two unrelated runs that shared a
+    # directory. Keying on the run id makes a reused directory harmless.
     tokens = 0
     seen = False
-    for log in run_out.rglob("*"):
-        if log.is_file() and log.suffix in (".log", ".txt"):
+    run_id = run.get("run_id")
+    transcripts = run_out / run_id if run_id else run_out
+    for log in transcripts.rglob("*"):
+        if "worktrees" in log.parts:
+            continue
+        if log.is_file() and log.name in ("stdout.log", "stderr.log"):
             found = tokens_of(lines_of(log))
             if found is not None:
                 tokens += found
@@ -188,6 +223,7 @@ def run_pipeline(task, args, out):
         "arm": "pipeline", "tokens": tokens if seen else None, "secs": round(secs, 1),
         "established": established, "total": total, "detail": detail,
         "route": run.get("route"), "status": run.get("status"),
+        "graph": report.get("graph", {}).get("complete"),
         "verdict": (report.get("verdict") or {}).get("outcome")
                    or (report.get("verdict") or {}).get("status"),
         "branch": branch,
@@ -209,12 +245,23 @@ def main():
     parser.add_argument("--ceiling-tokens", type=int, required=True,
                         help="Per-account spend ceiling. No default: a default "
                              "would be this script approving its own spend")
-    parser.add_argument("--cheap-model", default="gpt-5.6-luna")
-    parser.add_argument("--strong-model", default="gpt-5.6-luna")
+    # Required, and required to differ. P2's runner defaulted both to one model
+    # and that was right for its question: it compared the fast path against a
+    # direct call on the *same* model, so routing overhead was the only
+    # difference. Copying those defaults here would have collapsed the strong
+    # and cheap arms into one, silently turning gate 2 into a comparison of the
+    # pipeline against itself and leaving the cheap-arm control unable to detect
+    # an easy suite. Caught before any run; nothing was spent on it.
+    parser.add_argument("--strong-model", required=True)
+    parser.add_argument("--cheap-model", required=True)
     parser.add_argument("--budget-secs", type=int, default=300)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--timon", default="/usr/local/bin/timon")
     parser.add_argument("--seed", type=int, default=20261001)
+    parser.add_argument("--task", action="append",
+                        help="Run only these suite task ids. For staging a gate: "
+                             "one task first, read the real cost, then decide "
+                             "whether to commit to the rest")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the plan and the arm order, spend nothing")
     args = parser.parse_args()
@@ -228,21 +275,60 @@ def main():
         return 2
     print(check.stdout.strip().splitlines()[-1])
 
+    if args.strong_model == args.cheap_model:
+        print(
+            f"--strong-model and --cheap-model are both {args.strong_model!r}. The "
+            "registered arms are the pipeline, a single strong call and a single "
+            "cheap call; with one model the last two are the same arm and gate 2 "
+            "compares the pipeline against itself.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # The registration commits to keeping every transcript and every result
+    # branch, and stage one's were written under /tmp and are now gone, along
+    # with all thirteen result branches. The 6/6 finding it reported can no
+    # longer be re-derived from anything primary. Three faults on the P2 gate
+    # were free to fix only because its transcripts had survived; this one
+    # would not have been.
+    resolved = Path(args.out).resolve()
+    if resolved == Path("/tmp") or Path("/tmp") in resolved.parents:
+        print(
+            f"--out {resolved} is under /tmp, which does not survive. The "
+            "registration keeps every transcript and result branch because "
+            "re-scoring from them is what has made this project's instrument "
+            "faults cheap to correct. Choose a durable path.",
+            file=sys.stderr,
+        )
+        return 2
+
     args.suite_data = json.load(open(args.suite))
     out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # mkdir's mode is masked by the umask, so set it explicitly as well.
+    out.chmod(0o700)
+
+    chosen = args.suite_data["tasks"]
+    if args.task:
+        wanted = set(args.task)
+        chosen = [t for t in chosen if t["id"] in wanted]
+        missing = wanted - {t["id"] for t in chosen}
+        if missing:
+            print(f"no such task(s) in the suite: {', '.join(sorted(missing))}",
+                  file=sys.stderr)
+            return 2
 
     rng = random.Random(args.seed)
-    orders = balanced_orders(len(args.suite_data["tasks"]) * args.repeats, rng)
+    orders = balanced_orders(len(chosen) * args.repeats, rng)
     schedule = [
         (task, rep, orders.pop())
-        for task in args.suite_data["tasks"]
+        for task in chosen
         for rep in range(args.repeats)
     ]
 
-    print(f"{len(schedule)} pairs × 3 arms = {len(schedule) * 3} sessions")
+    print(f"{len(schedule)} pairs × 3 arms = {len(schedule) * 3} sessions", flush=True)
     print(f"account {args.account}, ceiling {args.ceiling_tokens:,} tokens, "
-          f"budget {args.budget_secs}s, seed {args.seed}")
+          f"budget {args.budget_secs}s, seed {args.seed}", flush=True)
     if args.dry_run:
         for task, rep, arms in schedule:
             print(f"  {task['id']}-{rep}  {' → '.join(arms)}")
@@ -263,15 +349,18 @@ def main():
                 json.dump(results, open(out / "results.json", "w"), indent=1)
                 return 3
             if arm == "pipeline":
-                got = run_pipeline(task, args, out)
+                got = run_pipeline(task, rep, args, out)
             else:
                 model = args.strong_model if arm == "strong" else args.cheap_model
                 got = run_single(task, arm, model, args, out)
             spent += got["tokens"] or 0
             record[arm] = got
             flag = "  OVERRUN" if got["overrun_secs"] > 0 else ""
+            # flush: redirected to a file, Python buffers this and a run that
+            # takes twenty minutes shows nothing at all until it exits. A gate
+            # that cannot be watched cannot be stopped early for a good reason.
             print(f"  {task['id']}-{rep} {arm:9} {got['established']}/{got['total']} "
-                  f"{(got['tokens'] or 0):>8,}tok {got['secs']:>6.1f}s{flag}")
+                  f"{(got['tokens'] or 0):>8,}tok {got['secs']:>6.1f}s{flag}", flush=True)
         results.append(record)
         json.dump(results, open(out / "results.json", "w"), indent=1)
 
