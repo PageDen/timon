@@ -285,6 +285,23 @@ def main():
         )
         return 2
 
+    # The registration commits to keeping every transcript and every result
+    # branch, and stage one's were written under /tmp and are now gone, along
+    # with all thirteen result branches. The 6/6 finding it reported can no
+    # longer be re-derived from anything primary. Three faults on the P2 gate
+    # were free to fix only because its transcripts had survived; this one
+    # would not have been.
+    resolved = Path(args.out).resolve()
+    if resolved == Path("/tmp") or Path("/tmp") in resolved.parents:
+        print(
+            f"--out {resolved} is under /tmp, which does not survive. The "
+            "registration keeps every transcript and result branch because "
+            "re-scoring from them is what has made this project's instrument "
+            "faults cheap to correct. Choose a durable path.",
+            file=sys.stderr,
+        )
+        return 2
+
     args.suite_data = json.load(open(args.suite))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True, mode=0o700)

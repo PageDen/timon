@@ -518,6 +518,26 @@ as a rule rather than a string, and genuinely requires B to read A.
 observed, so altering the criteria would be fitting the test to the result, which
 is the fault corrected in `registration-p2.md`. Stage one stands as scored.
 
+### Stage one's primary evidence was lost, and that is a finding too
+
+Written under `/tmp`, so the transcripts are gone, and all thirteen result
+branches have been deleted as well. **The 6/6 result can no longer be re-derived
+from anything primary.** What survives is
+`eval/results/gate-p6-stage1-asrun-2026-10-01.json` and its rescored pair — both
+derived artifacts, trustworthy only to the degree this document is.
+
+This breaks a commitment made above: *"Every transcript and every result branch
+is kept."* It is recorded rather than quietly repaired because of what it would
+have cost. Three faults on the P2 gate were free to fix precisely because its
+transcripts had survived, and the fault that mattered most here — `0/6` where the
+branches held `6/6` — was diagnosed by checking out those branches. Had they
+vanished an hour earlier, stage one would have been filed as "the planner path
+establishes nothing", which is both false and the conclusion I was most primed
+to believe.
+
+The runner now **refuses an `--out` under `/tmp`**. Retention is not a habit to
+rely on when the gate's own correctness has twice depended on it.
+
 ### The pipeline's cost rose across identical repeats
 
 45,985 → 109,076 → 149,904 tokens for the same task, in run order. Over three
