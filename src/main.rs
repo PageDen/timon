@@ -146,9 +146,22 @@ struct HandoffArgs {
     /// Where worker output is written.
     #[arg(long)]
     output_root: Option<PathBuf>,
-    /// Seconds a worker may run.
-    #[arg(long, default_value_t = 600)]
-    worker_deadline_secs: u64,
+    /// How long the whole run may take, in seconds.
+    ///
+    /// One number rather than three that have to agree: the worker deadline,
+    /// the point at which new work stops, and the depth a plan may reach are
+    /// all derived from it, so the worst case *is* the budget rather than
+    /// something larger that nobody worked out.
+    #[arg(long, default_value_t = 300)]
+    budget_secs: u64,
+    /// Workers at once. Width is nearly free; this is about how much of a
+    /// shared host one run should take.
+    #[arg(long)]
+    concurrency: Option<usize>,
+    /// Override the per-worker deadline the budget derived. Rarely wanted: it
+    /// is the thing that makes the budget a bound rather than a hope.
+    #[arg(long)]
+    worker_deadline_secs: Option<u64>,
     #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
     format: ReportFormat,
 }
@@ -1251,6 +1264,57 @@ fn nix_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// Judges a single-worker run.
+///
+/// It has no plan, so no acceptance criteria exist and acceptance is reported as
+/// not established — which is the truth: nobody said in advance what this run
+/// had to achieve. The project's own checks still run against the branch, which
+/// is what distinguishes "it produced something" from "it produced something
+/// that builds".
+fn verdict_for_single_worker(
+    run: &timon::run::record::Run,
+    executed: &timon::run::execute::Executed,
+) -> timon::verify::Verdict {
+    // One task, reported in the shape the verifier reads.
+    let task = timon::dag_run::TaskReport {
+        label: executed.route.as_str().to_string(),
+        outcome: match &executed.detail {
+            Some(detail) => timon::dag_run::Outcome::Failed {
+                detail: detail.clone(),
+            },
+            None => timon::dag_run::Outcome::Done {
+                artifact: timon::dag_inputs::Artifact::new(
+                    executed.route.as_str(),
+                    1,
+                    executed.output.clone().unwrap_or_default(),
+                ),
+            },
+        },
+        input: None,
+        started_at: None,
+        ended_at: None,
+    };
+    let complete = executed.detail.is_none();
+    let execution = timon::dag_run::GraphReport {
+        tasks: vec![task],
+        complete,
+        not_run: Vec::new(),
+    };
+    let checks = timon::verify::ProjectChecks::for_repository(
+        run.workspace.as_deref(),
+        executed.branch.as_deref(),
+    );
+    timon::verify::verify(
+        &timon::verify::Subject {
+            execution: &execution,
+            branch: executed.branch.as_deref(),
+            tested: executed.branch.clone(),
+            criteria: Vec::new(),
+        },
+        &checks,
+    )
+}
+
 /// The acceptance criteria of the tasks that finished.
 ///
 /// A task that never ran has not failed its criteria — it has not been judged,
@@ -1306,7 +1370,24 @@ fn run_execute(
     args: &HandoffArgs,
     now: i64,
 ) -> Result<u8> {
+    use timon::budget::Budget;
     use timon::run::execute::{Plan, execute};
+
+    let depth = timon::dag::Limits::default().max_depth;
+    let mut budget = Budget::from_total(
+        std::time::Duration::from_secs(args.budget_secs),
+        depth,
+        args.concurrency,
+    );
+    if let Some(override_secs) = args.worker_deadline_secs {
+        budget.worker_deadline = std::time::Duration::from_secs(override_secs);
+        budget.run_deadline = budget.total.saturating_sub(budget.worker_deadline);
+    }
+    if let Err(why) = budget.viable() {
+        eprintln!("timon run: {why}");
+        return Ok(1);
+    }
+    eprintln!("timon run: {}", budget.describe());
 
     let default_command = |model: Option<&String>, writes: bool| -> Vec<std::ffi::OsString> {
         // `codex exec` reading its task from stdin. The task never goes in the
@@ -1348,9 +1429,11 @@ fn run_execute(
             .output_root
             .clone()
             .unwrap_or_else(|| std::env::temp_dir().join("timon-runs")),
-        deadline: std::time::Duration::from_secs(args.worker_deadline_secs),
+        deadline: budget.worker_deadline,
         max_output_bytes: 8 * 1024 * 1024,
-        grant_lifetime_secs: args.worker_deadline_secs as i64 + 60,
+        // The grant outlives the worst case by a minute, so authority never
+        // expires underneath work that is still allowed to be running.
+        grant_lifetime_secs: budget.worst_case().as_secs() as i64 + 60,
     };
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1372,20 +1455,24 @@ fn run_execute(
     // They share the grant and nothing else, so they are separate calls rather
     // than one function with a mode flag.
     if decision.route == timon::triage::Route::Planner {
-        let report = runtime.block_on(timon::run::execute::execute_planned(
-            runs,
-            run,
-            decision,
-            &plan,
-            &timon::dag::Limits::default(),
-            timon::dag_run::Bounds {
-                concurrency: 2,
-                deadline: run.deadline,
+        let envelope = timon::run::execute::Envelope {
+            limits: timon::dag::Limits {
+                max_depth: budget.max_depth,
+                ..timon::dag::Limits::default()
+            },
+            bounds: timon::dag_run::Bounds {
+                concurrency: budget.concurrency,
+                // Derived from the budget, so new work stops early enough that
+                // the last worker admitted cannot run past it.
+                deadline: Some(now + budget.run_deadline.as_secs() as i64),
                 // P4.3's gate. Read from the qualification record rather than
                 // assumed, and absent means shut.
                 writing_permitted: qualification_passes(),
             },
-            now,
+            budget,
+        };
+        let report = runtime.block_on(timon::run::execute::execute_planned(
+            runs, run, decision, &plan, &envelope, now,
         ));
         return match report {
             Ok(mut report) => {
@@ -1414,6 +1501,11 @@ fn run_execute(
                         if !report.graph.not_run.is_empty() {
                             println!("  not run     {}", report.graph.not_run.join(", "));
                         }
+                        println!(
+                            "\nThis was one pass. Whether to run another is yours to \
+decide — nothing here will repair the work on its own, because a host repairing \
+against its own criteria can make correct work worse."
+                        );
                         match (&report.verdict, report.caveat) {
                             (Some(verdict), _) => {
                                 println!("\n{}", verdict.render());
@@ -1436,8 +1528,20 @@ fn run_execute(
 
     match executed {
         Ok(executed) => {
+            // The same judgement a planned run gets. A developer asked to decide
+            // whether to go again needs something to decide on, and "the worker
+            // exited cleanly" is not it — that was true of three tasks that
+            // produced an empty branch.
+            let verdict = verdict_for_single_worker(run, &executed);
+
             match args.format {
-                ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&executed)?),
+                ReportFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "run": &executed,
+                        "verdict": &verdict,
+                    }))?
+                ),
                 _ => {
                     println!("{}  {}", executed.run_id, executed.status.as_str());
                     println!("  route       {}", executed.route.as_str());
@@ -1452,6 +1556,8 @@ fn run_execute(
                     if let Some(output) = &executed.output {
                         println!("\n{}", output.trim_end());
                     }
+                    println!("\n{}", verdict.render());
+                    println!("This was one pass. Whether to run another is yours to decide.");
                 }
             }
             Ok(if executed.detail.is_some() { 1 } else { 0 })

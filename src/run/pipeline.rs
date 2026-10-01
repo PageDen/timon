@@ -108,9 +108,13 @@ Split it into tasks that can be worked on separately. Each task is given to a \
 worker that starts fresh: it sees only the text you write for it, not this \
 instruction, not the goal, and not the other tasks. So each task must stand on \
 its own.\n\n\
-When one task needs another's output, name it in `depends_on`. That is not just \
+When one task needs another's output, put that task's `label` in `depends_on` — \
+the label exactly as you wrote it, not a description of what it produces. \
+`\"depends_on\":[\"write-notes\"]`, never \
+`\"depends_on\":[\"the completed notes file\"]`; a plan naming anything other than a \
+label is refused and has to be written again. The dependency is not just \
 ordering: the host gives a dependent task what its dependencies actually \
-produced, so say what you need rather than describing it.\n\n\
+produced, so there is no need to describe it.\n\n\
 Mark a task `\"access\": \"write\"` when it changes files, and `\"read\"` when it \
 only reads. Writing tasks that touch the same code should be one task, not \
 several — separate workers editing the same files conflict, and the host will \
@@ -187,6 +191,24 @@ pub fn accept(plan: &Plan, limits: &Limits) -> Result<Validated, PipelineError> 
     validate(plan, limits).map_err(|faults| PipelineError::InvalidPlan {
         faults: faults.iter().map(|fault| fault.to_string()).collect(),
     })
+}
+
+/// Validates a plan and checks it can finish inside the budget.
+///
+/// Both before anything runs. The host knows the depth and the per-worker
+/// ceiling, so it can say in advance whether a graph fits — and a plan refused
+/// in advance costs nothing, while one discovered not to fit at minute four
+/// costs the whole run.
+pub fn accept_within(
+    plan: &Plan,
+    limits: &Limits,
+    budget: &crate::budget::Budget,
+) -> Result<Validated, PipelineError> {
+    let graph = accept(plan, limits)?;
+    budget
+        .fits(graph.depth())
+        .map_err(|why| PipelineError::InvalidPlan { faults: vec![why] })?;
+    Ok(graph)
 }
 
 /// Runs an accepted graph and merges what it produced.

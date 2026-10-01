@@ -159,3 +159,25 @@ fn a_writing_task_that_wrote_nothing_is_a_failure_not_a_success() {
     // And a reading task is not expected to write at all.
     assert!(changed_nothing(Access::Read, true, "here is the answer").is_none());
 }
+
+#[test]
+fn the_prompt_tells_the_planner_that_depends_on_holds_labels() {
+    // Observed on 2026-10-01: a planner wrote
+    // `"depends_on":["The completed NOTES.md file and its contents from the
+    // write-notes task"]`. Validation refused it correctly and in 15 seconds,
+    // with nothing spent on workers — but the prompt had invited the mistake by
+    // saying "name it" without saying what the name is.
+    let prompt = plan_prompt("goal", &Limits::default());
+    assert!(
+        prompt.contains("put that task's `label` in `depends_on`"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("not a description of what it produces"),
+        "it should rule out the mistake explicitly"
+    );
+    assert!(
+        prompt.contains("is refused and has to be written again"),
+        "and say what happens, so the cost is visible to the planner"
+    );
+}
