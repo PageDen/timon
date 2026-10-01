@@ -309,7 +309,15 @@ fn a_status_round_trips_through_its_text_form() {
 #[test]
 fn a_recorded_run_is_not_running_and_is_not_stranded_by_a_restart() {
     let (_dir, runs) = store();
-    let run = admit(&runs, request("not run yet"), Base::None, NOW, None, RESERVE).unwrap();
+    let run = admit(
+        &runs,
+        request("not run yet"),
+        Base::None,
+        NOW,
+        None,
+        RESERVE,
+    )
+    .unwrap();
 
     assert_eq!(run.status, Status::Recorded);
     assert!(!run.status.live(), "nothing is running, so nothing is live");
@@ -332,7 +340,15 @@ fn a_recorded_run_is_not_running_and_is_not_stranded_by_a_restart() {
 #[test]
 fn cancelling_a_recorded_run_changes_nothing() {
     let (_dir, runs) = store();
-    let run = admit(&runs, request("not run yet"), Base::None, NOW, None, RESERVE).unwrap();
+    let run = admit(
+        &runs,
+        request("not run yet"),
+        Base::None,
+        NOW,
+        None,
+        RESERVE,
+    )
+    .unwrap();
     let after = runs.cancel(&run.id, ALICE, NOW + 1).unwrap();
     assert_eq!(after.status, Status::Recorded);
 }
