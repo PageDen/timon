@@ -1,5 +1,7 @@
 # Using Timon
 
+On a Mac, start with [MAC.md](MAC.md): the setup differs, the use does not.
+
 A hand-off takes a goal, does the work on a branch, and tells you what it could
 and could not establish. Your working tree is never touched.
 
