@@ -45,7 +45,7 @@ Four, in the order I would stop the project over them. Each can fail alone.
 | # | Gate | Statistic | Passes when |
 |---|---|---|---|
 | 1 | **Verdict honesty** | Count of runs reporting `done` whose claimed criteria do not all hold on the result branch, hand-checked | **Exactly zero** |
-| 2 | **Deliverables** | Median criteria established per task, pipeline against a single strong call | Pipeline **≥** strong |
+| 2 | **Deliverables** | Median **fraction** of criteria established per task (established ÷ total), pipeline against a single strong call | Pipeline **≥** strong |
 | 3 | **Budget** | **Maximum** wall-clock overrun past `--budget-secs`, over every run | **Zero overruns** |
 | 4 | **Cost** | Median tokens per **established criterion**, pipeline against a single strong call | Ratio **≤ 2.0** |
 
@@ -79,6 +79,19 @@ suite.
 longer; merely matching a single strong call on deliverables would be a real
 finding against the route, and I would rather record that honestly than discover
 I had registered a threshold the route could only clear by being lucky.
+
+**Amended 2026-10-01, before any run and with no data in existence**, from
+"median criteria established per task" to the median *fraction*. Writing the
+reporter exposed that the first version mixed incomparable units: the suite's
+tasks have 6, 7, 7, 5 and 2 criteria, so a count of 4 means four sevenths on p2
+and is impossible on p5, and a *perfect* score on p5 (2 of 2) would sit below a
+*failing* score on p2 (4 of 7) in the same median.
+
+The amendment is recorded rather than quietly applied because the distinction
+that matters is *when*. Changing a statistic before the data exists is fixing a
+mistake; changing it afterwards is what happened on the P2 cost gate and is the
+reason this document names estimators at all. Nothing had been run, so nothing
+about this choice could have been motivated by a result.
 
 ### Gate 3: why the maximum and not the median
 
@@ -254,13 +267,71 @@ names left unredacted.
 **0, 20 and 27 on known inputs is the range this gate needs.** An instrument that
 only ever reports full marks or zero cannot report a difference between arms.
 
-## Still to build before any spend
+## The runner and the reporter, also validated before any spend
 
-1. `eval/run-gate-p6.py` — randomised arm order, three repeats, transcripts and
-   result branches retained, per-account spend ceiling enforced, refusing to
-   start if `score-criteria.py --self-test` does not pass.
-2. A reporter that prints the four registered statistics **and** says
-   INCONCLUSIVE where the registration requires it.
+Both exist. Neither has made a model call.
 
-The suite and the checker are done. **No model call is made on this gate's
-behalf until 1 and 2 exist and Chris has approved the spend per account.**
+**`eval/run-gate-p6.py`** refuses to start unless `score-criteria.py
+--self-test` passes, and refuses to start without an explicit
+`--ceiling-tokens`: a default ceiling would be the script approving its own
+spend. `--account` is required and pinned, because an unpinned run lets the
+broker pick, and the broker picks the healthiest account — possibly the one a
+developer is mid-session on.
+
+**The single-call arms use the pipeline's own write-worker command**, `codex
+exec -m MODEL -s workspace-write --skip-git-repo-check -` with the task on
+stdin, started in a throwaway worktree off HEAD. Not an approximation of it. A
+single call run read-only, or denied the write sandbox, would lose every writing
+criterion before the comparison began, and the gate would be measuring its own
+harness rather than the arms.
+
+### Arm order is counterbalanced, not merely randomised
+
+Independent shuffling per pair does not balance at this sample size. The first
+implementation, on the registered seed, put the pipeline arm **last in 8 of 15
+pairs and second in 2**. Whoever runs later inherits a warm prompt cache, so a
+lopsided draw reintroduces a weaker form of the exact confound that made run 1
+of the P2 gate report 1.495 against a true 1.129.
+
+The design is therefore counterbalanced first and randomised second: every arm
+occupies every position **exactly five times** across the fifteen pairs, and the
+order of the blocks is shuffled so position is still not predictable from where a
+task sits in the schedule. Verified at every suite size, with the imbalance never
+exceeding one where the count is not a multiple of three.
+
+### The reporter, on five fixtures whose answers were known first
+
+| Fixture | Expected | Reported |
+|---|---|---|
+| Clean separation | all gates pass | **all pass** |
+| A `done` verdict with unmet criteria | gate 1 fails and stops | **FAIL, exit 1, later gates not computed** |
+| High variance, overlapping IQRs | gates 2 and 4 inconclusive | **INCONCLUSIVE on both** |
+| Pipeline over its budget | gate 3 fails on the maximum | **FAIL, worst +130.0s** |
+| p5 sent to the planner | control fails | **FAIL** |
+
+It also **refuses malformed records** rather than computing over them — a count
+outside 0..total cannot come from the checker, so it means rows were mis-paired
+or a total was lost upstream. That guard exists because a deliberately broken
+fixture printed `-1/2` and the reporter scored it without complaint. Five
+instruments here have been wrong on first contact with real data and every one
+of them reported a number rather than refusing.
+
+## What is left before this gate runs
+
+**Only your approval.** The suite, the checker, the runner and the reporter are
+built and validated at zero spend. What is needed from Chris:
+
+- Which account the gate may spend, and whether the strong arm pays from a
+  different one.
+- A ceiling per account. The stop rule is already enforced in the runner:
+  reaching it stops for a decision, does not continue, and does not switch
+  accounts.
+- Whether the account is reserved and quiet for the duration. This is
+  measurement rather than budget — concurrent use makes the quota figures an
+  upper bound with the contamination named.
+
+And one fact to settle first: **whether `prolite` on `acct3` serves the strong
+model.** The strong arm is meaningless if it silently runs on something else,
+and the models endpoint is known to lie about exactly this.
+
+`--dry-run` prints the full schedule and arm order and spends nothing.
