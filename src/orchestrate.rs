@@ -236,6 +236,16 @@ pub async fn run(phases: &Phases) -> anyhow::Result<Outcome> {
                     }
                     break;
                 }
+                Err(error @ SlotError::YoursFull { .. }) => {
+                    // Not the same as a busy host, and worth saying so: other
+                    // slots may well be free, and the fix is this caller's own
+                    // concurrency rather than waiting for the machine.
+                    outcome.stopped = Some(format!("{error}; delegation stopped"));
+                    if let Some(ledger) = &phases.ledger {
+                        let _ = ledger.settle(&attempt_id, Some(0));
+                    }
+                    break;
+                }
                 Err(error) => {
                     outcome.stopped = Some(format!("a worker slot could not be taken: {error}"));
                     break;

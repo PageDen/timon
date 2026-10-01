@@ -274,6 +274,10 @@ struct OrchestrateArgs {
     slots: Option<NonZeroU16>,
     #[arg(long, requires = "slot_dir")]
     provisioned_slots: bool,
+    /// Most slots one user may hold at once. Without it the host limit is the
+    /// only limit, and one person's work can occupy every slot.
+    #[arg(long, requires = "slot_dir")]
+    slots_per_user: Option<NonZeroU16>,
     #[arg(long)]
     run_ledger: Option<PathBuf>,
     #[arg(long, default_value_t = 64)]
@@ -324,6 +328,10 @@ struct McpArgs {
     slots: Option<NonZeroU16>,
     #[arg(long, requires = "slot_dir")]
     provisioned_slots: bool,
+    /// Most slots one user may hold at once. Without it the host limit is the
+    /// only limit, and one person's work can occupy every slot.
+    #[arg(long, requires = "slot_dir")]
+    slots_per_user: Option<NonZeroU16>,
     /// Admission ledger, so delegation is bounded by the run's allowance.
     #[arg(long)]
     run_ledger: Option<PathBuf>,
@@ -744,6 +752,10 @@ struct RunArgs {
     /// Require slot files to exist instead of creating them (shared hosts).
     #[arg(long, requires = "slot_dir")]
     provisioned_slots: bool,
+    /// Most slots one user may hold at once. Without it the host limit is the
+    /// only limit, and one person's work can occupy every slot.
+    #[arg(long, requires = "slot_dir")]
+    slots_per_user: Option<NonZeroU16>,
     /// Working directory for the attempt.
     #[arg(long)]
     cwd: Option<PathBuf>,
@@ -864,14 +876,17 @@ fn orchestrate_run(args: OrchestrateArgs) -> Result<u8> {
         bail!("the goal is empty");
     }
     let slots = match (&args.slot_dir, args.slots) {
-        (Some(dir), Some(limit)) => Some(SlotPool::new(
-            dir,
-            limit,
-            if args.provisioned_slots {
-                SlotMode::Provisioned
-            } else {
-                SlotMode::CreateMissing
-            },
+        (Some(dir), Some(limit)) => Some(with_fairness(
+            SlotPool::new(
+                dir,
+                limit,
+                if args.provisioned_slots {
+                    SlotMode::Provisioned
+                } else {
+                    SlotMode::CreateMissing
+                },
+            ),
+            args.slots_per_user,
         )),
         _ => None,
     };
@@ -935,14 +950,17 @@ fn orchestrate_run(args: OrchestrateArgs) -> Result<u8> {
 
 fn mcp_serve(args: McpArgs) -> Result<u8> {
     let slots = match (&args.slot_dir, args.slots) {
-        (Some(dir), Some(limit)) => Some(SlotPool::new(
-            dir,
-            limit,
-            if args.provisioned_slots {
-                SlotMode::Provisioned
-            } else {
-                SlotMode::CreateMissing
-            },
+        (Some(dir), Some(limit)) => Some(with_fairness(
+            SlotPool::new(
+                dir,
+                limit,
+                if args.provisioned_slots {
+                    SlotMode::Provisioned
+                } else {
+                    SlotMode::CreateMissing
+                },
+            ),
+            args.slots_per_user,
         )),
         _ => None,
     };
@@ -1041,6 +1059,18 @@ fn render_verification(report: &verify::Report) -> String {
     ));
     out.push_str(&format!("\n  {}\n", report.basis));
     out
+}
+
+/// Applies a per-user cap when one was asked for.
+///
+/// The host limit stops the machine being overloaded and says nothing about
+/// whose work is on it; this is the second half of that. Absent, behaviour is
+/// exactly as before.
+fn with_fairness(pool: SlotPool, per_user: Option<NonZeroU16>) -> SlotPool {
+    match per_user {
+        Some(cap) => pool.per_user(cap),
+        None => pool,
+    }
 }
 
 fn slots_provision(args: ProvisionArgs) -> Result<u8> {
@@ -2324,10 +2354,18 @@ fn attempt_run(role: Role, args: RunArgs) -> Result<u8> {
             } else {
                 SlotMode::CreateMissing
             };
-            match SlotPool::new(dir, limit, mode).try_acquire() {
+            match with_fairness(SlotPool::new(dir, limit, mode), args.slots_per_user).try_acquire()
+            {
                 Ok(lease) => Some(lease),
                 Err(SlotError::Full) => {
                     eprintln!("timon: all worker slots are in use; retry later");
+                    return Ok(EXIT_NO_SLOT);
+                }
+                Err(error @ SlotError::YoursFull { .. }) => {
+                    // Same exit code: the caller could not start, and a script
+                    // that retries should retry either way. The message is
+                    // different because the reason is.
+                    eprintln!("timon: {error}");
                     return Ok(EXIT_NO_SLOT);
                 }
                 Err(error) => return Err(error.into()),

@@ -146,9 +146,27 @@ that developer's own logins, `~/.codex/auth.json` among them. That is inherent t
 running as them and no sandbox undoes it. What changed is that the *pooled* store
 is no longer any developer's to read.
 
-**No per-user fairness limits.** `TasksMax`, `LimitNOFILE` and `MemoryMax` cap the
-process as a whole, so one runaway script can still occupy every slot for
-everyone. Codex's review asked for per-user limits and they are not built.
+**Fixed 2026-10-01: per-user slot limits, Codex review point 11.**
+`TasksMax`, `LimitNOFILE` and `MemoryMax` cap the process as a whole and say
+nothing about *whose* work is on the host, so one developer's loop could hold
+every slot and everyone else saw `Full` until it finished. `--slots-per-user`
+caps how many any one uid holds at once, using the same file-lock primitive in a
+directory of the caller's own: the locks are the accounting, so no process reads
+another's state. The caller's own slot is taken first, because taking a host slot
+and then refusing on the cap would occupy a slot for the length of the refusal.
+
+`Full` and `YoursFull` are reported differently, because "the host is busy" and
+"you are" call for different responses from whoever reads them. Verified with the
+real binary: with a cap of 1 and one worker running, a second is refused with
+exit 75 while three host slots sit free, and the identical call without the flag
+succeeds — so the cap is what binds, not something else.
+
+**What it does not do.** The per-user directory is created on demand even on a
+provisioned host, because an operator cannot provision directories for uids they
+have not met. So **a user who deletes their own cap files can exceed their cap.**
+They still cannot exceed the host limit, which is provisioned and not theirs to
+touch. This is fairness against runaway work, not a boundary against someone
+determined to take more, and nothing here should be read as the latter.
 
 **`acct3`'s plan is still settling.** It reported `go`, then `plus` with a 5-hour
 window, then `prolite` with a 7-day one, over about twenty minutes on

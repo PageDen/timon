@@ -36,6 +36,13 @@ pub struct SlotPool {
     dir: PathBuf,
     limit: NonZeroU16,
     mode: SlotMode,
+    /// The most slots one uid may hold at once, when fairness is configured.
+    ///
+    /// The host limit stops the machine being overloaded; it does nothing about
+    /// *whose* work is on it. One developer's loop could take every slot and
+    /// everyone else would see `Full` until it finished, which is the gap
+    /// Codex's review asked about.
+    per_user: Option<NonZeroU16>,
 }
 
 /// A held slot. Dropping it releases the slot.
@@ -44,6 +51,10 @@ pub struct SlotLease {
     index: u16,
     // Held for its lock. Dropping unlocks explicitly; see `Drop`.
     file: File,
+    /// The caller's own per-user slot, held for exactly as long as the host one.
+    /// Taken first, so a caller at their own cap never occupies a host slot
+    /// while being turned away.
+    user: Option<(u16, File)>,
 }
 
 /// Why a slot could not be acquired.
@@ -51,6 +62,10 @@ pub struct SlotLease {
 pub enum SlotError {
     /// Every slot is held.
     Full,
+    /// The caller already holds as many slots as one uid may hold. Distinct
+    /// from `Full` because the two mean different things to whoever reads them:
+    /// the host is busy, or you are.
+    YoursFull { uid: u32, cap: u16 },
     /// A slot file is missing in [`SlotMode::Provisioned`].
     Missing(PathBuf),
     /// Any other I/O failure.
@@ -61,6 +76,11 @@ impl std::fmt::Display for SlotError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SlotError::Full => write!(f, "all worker slots are in use"),
+            SlotError::YoursFull { uid, cap } => write!(
+                f,
+                "uid {uid} already holds {cap} worker slot(s), which is the limit for \
+                 one user on this host; other slots may be free"
+            ),
             SlotError::Missing(path) => {
                 write!(
                     f,
@@ -88,7 +108,27 @@ impl SlotPool {
             dir: dir.into(),
             limit,
             mode,
+            per_user: None,
         }
+    }
+
+    /// Caps how many slots any one uid may hold at once.
+    ///
+    /// A cap at or above the host limit changes nothing, and is allowed rather
+    /// than rejected: an operator sizing a host should not have to reason about
+    /// which of two numbers binds.
+    pub fn per_user(mut self, cap: NonZeroU16) -> Self {
+        self.per_user = Some(cap);
+        self
+    }
+
+    pub fn per_user_limit(&self) -> Option<NonZeroU16> {
+        self.per_user
+    }
+
+    /// Where one uid's own slots live.
+    pub fn user_dir(&self, uid: u32) -> PathBuf {
+        self.dir.join(format!("u{uid}"))
     }
 
     pub fn dir(&self) -> &Path {
@@ -106,21 +146,78 @@ impl SlotPool {
 
     /// Tries to take a free slot without waiting.
     ///
-    /// Returns [`SlotError::Full`] immediately when every slot is held.
+    /// Returns [`SlotError::Full`] immediately when every slot is held, and
+    /// [`SlotError::YoursFull`] when the caller is already at their own cap.
     pub fn try_acquire(&self) -> Result<SlotLease, SlotError> {
+        self.try_acquire_as(current_uid())
+    }
+
+    /// The same, for a stated uid. Separated so fairness can be tested without
+    /// running as several users.
+    pub fn try_acquire_as(&self, uid: u32) -> Result<SlotLease, SlotError> {
         if self.mode == SlotMode::CreateMissing {
             self.create_dir()?;
         }
+        // The caller's own slot first. Taking a host slot and then discovering
+        // the caller is at their cap would occupy a slot for the length of the
+        // refusal, which is the opposite of fairness.
+        let user = match self.per_user {
+            Some(cap) => Some(self.take_user_slot(uid, cap)?),
+            None => None,
+        };
         for index in 0..self.limit.get() {
             let path = self.slot_path(index);
             let file = self.open_slot(&path)?;
             match file.try_lock() {
-                Ok(()) => return Ok(SlotLease { index, file }),
+                Ok(()) => return Ok(SlotLease { index, file, user }),
                 Err(TryLockError::WouldBlock) => continue,
                 Err(TryLockError::Error(error)) => return Err(SlotError::Io(path, error)),
             }
         }
         Err(SlotError::Full)
+    }
+
+    /// Takes one of a single uid's own slots.
+    ///
+    /// The same file-lock primitive as the host pool, in a directory of the
+    /// caller's own, which is what makes the count exact without any process
+    /// having to read another's state: the locks *are* the accounting.
+    ///
+    /// The directory is created on demand even on a provisioned host. An
+    /// operator cannot provision directories for uids they do not know yet, and
+    /// a user creating the files that limit only themselves is not a privilege.
+    /// **The honest consequence: a user who deletes their own cap files can
+    /// exceed their cap.** They still cannot exceed the host limit, which is
+    /// provisioned and not theirs to touch. This is fairness against runaway
+    /// work, not a boundary against someone determined to take more.
+    fn take_user_slot(&self, uid: u32, cap: NonZeroU16) -> Result<(u16, File), SlotError> {
+        let dir = self.user_dir(uid);
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        if !dir.exists() {
+            builder
+                .create(&dir)
+                .map_err(|error| SlotError::Io(dir.clone(), error))?;
+        }
+        let mine = SlotPool::new(&dir, cap, SlotMode::CreateMissing);
+        for index in 0..cap.get() {
+            let path = mine.slot_path(index);
+            let file = mine.open_slot(&path)?;
+            match file.try_lock() {
+                Ok(()) => return Ok((index, file)),
+                Err(TryLockError::WouldBlock) => continue,
+                Err(TryLockError::Error(error)) => return Err(SlotError::Io(path, error)),
+            }
+        }
+        Err(SlotError::YoursFull {
+            uid,
+            cap: cap.get(),
+        })
     }
 
     fn create_dir(&self) -> Result<(), SlotError> {
@@ -163,9 +260,24 @@ impl SlotPool {
     }
 }
 
+/// The uid this process runs as.
+fn current_uid() -> u32 {
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid cannot fail and touches no memory we own.
+        unsafe { libc::getuid() }
+    }
+}
+
 impl SlotLease {
     pub fn index(&self) -> u16 {
         self.index
+    }
+
+    /// Which of the holder's own slots this lease occupies, when a per-user cap
+    /// is configured.
+    pub fn user_index(&self) -> Option<u16> {
+        self.user.as_ref().map(|(index, _)| *index)
     }
 
     /// The locked slot file. Exposed so tests can duplicate the descriptor and
@@ -194,6 +306,12 @@ impl Drop for SlotLease {
         #[cfg(unix)]
         unsafe {
             libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.file), libc::LOCK_UN);
+            // The per-user slot goes back at the same moment, for the same
+            // reason. Releasing one and not the other would let a caller sit at
+            // their cap holding nothing.
+            if let Some((_, file)) = &self.user {
+                libc::flock(std::os::fd::AsRawFd::as_raw_fd(file), libc::LOCK_UN);
+            }
         }
     }
 }
