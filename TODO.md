@@ -5,14 +5,23 @@ they are not rediscovered as surprises.
 
 ## From measurement
 
-**The P2 cost tail is not explained.** The gate's per-pair ratio has a median of
-1.129, inside the registered 25% margin, but 10 of 25 pairs sit outside it and
-paired deltas range from −8,946 to +8,910 tokens. The working hypothesis is that
-it is the model's own variation in how many tool calls it makes, not anything the
-routing does — a task that greps once costs a third of the same task grepping
-three times. **Untested.** Settling it needs the per-pair transcripts compared
-turn by turn, and probably more traffic than a five-task suite produces.
-Deferred, not dismissed: the cost gate stays inconclusive until it is done.
+**The P2 cost tail is explained only negatively, and the cost gate passed.**
+Settled 2026-10-01 by `eval/explain-tail.py` against the saved transcripts. The
+hypothesis recorded here — that the tail was the model varying how many tool
+calls it made — **was wrong**: 24 of 25 pairs took exactly one turn on *both*
+arms and still differed by up to 8,946 tokens. Tokens per turn match at a ratio
+of 1.023, so the routing adds no measurable overhead, and the spread is intra-turn
+variation shared by both arms. The gate passes on its registered statistic
+(arm medians, 1.023 against a 1.25 margin); the earlier INCONCLUSIVE came from
+me substituting an unregistered statistic after seeing the data — one that,
+applied to run 1, would have concealed the ordering confound instead. Both
+corrections are in `eval/registration-p2.md`.
+
+What remains open is the *cause* of the intra-turn spread. Per-pair cost on this
+suite is unpredictable within a factor of about eight, token figures fall in
+shared bands near 1,100 / 2,200 / 3,200 / 4,300 / 6,200, and no mechanism is
+established. It does not block anything — it bounds what a five-task single-turn
+suite can measure. **A future cost gate needs more pairs or multi-turn tasks.**
 
 **Quota percentage cannot see work this small.** 113,355 tokens moved a 7-day
 window by nothing visible. The plan's budget language is written in windows, and

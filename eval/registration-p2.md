@@ -167,11 +167,15 @@ is written in windows, and windows cannot see work this small.
 
 **Quality: PASS.** Both arms answered every task correctly.
 
-**Cost: INCONCLUSIVE.** Per-pair ratio has a median of 1.129 (+12.9%), inside the
-registered 25% margin — but 10 of 25 pairs sit outside it, and the paired delta
-ranges from −8,946 to +8,910 tokens. The typical pair is fine; the tail is not
-settled, and a margin test cannot be called passed while two pairs in five exceed
-it.
+**Cost: PASS on the registered statistic — 1.023 against a margin of 1.25.**
+Arm medians are 3,218 against 3,145.
+
+*This paragraph originally read INCONCLUSIVE, on the ground that the median
+per-pair ratio was 1.129 and 10 of 25 pairs sat outside the margin. That was not
+the registered statistic and it was chosen after the data arrived. Corrected in
+"Run 2, re-analysed" below, which also withdraws the tool-call hypothesis for the
+tail. The per-pair spread is real and is recorded there; it is a property of the
+tasks, not of the fast path.*
 
 There is no evidence the fast path is systematically expensive: it was cheaper in
 9 pairs and dearer in 16, and the spread swamps the lean. **No cause for the lean
@@ -199,3 +203,103 @@ gate, two of them found only by looking at what the numbers were made of.
 **Standing rule from this:** a gate result is not reported until the failing
 cases have been read individually. A rate hides which case broke, and twice here
 the case that broke was the instrument.
+
+## Run 2, re-analysed — 2026-10-01 — cost: PASS, and a fourth fault that was mine
+
+The cost tail was left unexplained above, with a recorded hypothesis: that the
+spread was the model varying how many tool calls it made. `eval/explain-tail.py`
+counts turns per transcript from the saved `/tmp/gate2` logs — a re-read, not a
+re-spend — and **refutes it.**
+
+**24 of the 25 pairs took exactly one turn on both arms.** Only `g5-4` differed
+(2 against 1). Identical tool use, and the absolute token difference at identical
+turn counts still has a median of 2,012 and a maximum of 8,946. Whatever the
+spread is, it happens *inside* a single turn, so tool-call variance cannot be the
+cause. The hypothesis is withdrawn.
+
+What the same analysis shows positively:
+
+| | timon | direct |
+|---|---|---|
+| Tokens per turn, median | 3,218 | 3,145 |
+| | **ratio 1.023** | |
+
+If the routing added overhead, cost per turn would differ. It does not — 2.3%,
+which is within a single pair's noise.
+
+**The spread belongs to the task, not to the arm.** Pooling both arms' 50
+figures and grouping values that fall within 400 tokens of each other gives
+bands that *both arms occupy about equally*:
+
+| band | n | timon | direct |
+|---|---|---|---|
+| 1,095–1,324 | 13 | 7 | 6 |
+| 2,219–2,221 | 3 | 0 | 3 |
+| 2,769–3,350 | 17 | 9 | 8 |
+| 4,055–5,310 | 8 | 4 | 4 |
+| 5,915–6,302 | 5 | 2 | 3 |
+| 7,443 … 12,186 | 4 | 3 | 1 |
+
+Five pairs agree to within 100 tokens (−40, −18, +11, +29, +32); the rest differ
+by whole bands in either direction. The thin top tail is 3 timon against 1
+direct, which at n=4 is not a finding either way.
+
+A mechanism for the banding is **not** established. The best single-quantum fit
+is 531 tokens with a ±100 residual, which is a harmonic of the band spacing
+rather than evidence of a quantum, so the banding is recorded as an observation
+with no cause claimed.
+
+The ordering confound is genuinely gone: the arm that ran first was the dearer
+one in 11 of 25 pairs, which is chance.
+
+### The fourth fault: I changed the statistic after seeing the data
+
+The registered criterion, written before the run, is at **Measured** above:
+*median fast-path tokens no more than 25% above a direct cheap call on the same
+task.* That is the median of each arm. It reads **3,218 against 3,145 — a ratio
+of 1.023.**
+
+What I reported instead was the median of the per-pair *ratios*, 1.129, and then
+called the gate inconclusive because 10 of 25 pairs sat outside the margin. That
+is a stricter test than the registered one, and I chose it after the numbers came
+back. It is also the wrong estimator for this data: a per-pair ratio divides two
+noisy quantities, so with both arms drawing from the same wide banded
+distribution it reports the spread as much as the lean.
+
+**It is not reliably stricter, either — it is just unmoored.** Running the same
+script against run 1's transcripts:
+
+| | registered (arm medians) | substituted (per-pair) |
+|---|---|---|
+| Run 1 | **1.495 — FAIL** | 1.108 |
+| Run 2 | **1.023 — PASS** | 1.129 |
+
+On run 2 the substitute withheld a pass that the registered statistic grants. On
+run 1 it would have *concealed* a genuine 1.495 failure — the ordering confound,
+the largest real effect this gate has found — and reported a comfortable 1.108.
+Had I used it consistently from the start, run 1 would have passed and the
+confound would have shipped as a finding. It diverges in both directions, and the
+direction is not predictable from the data.
+
+**Cost: PASS.** 1.023 against a registered margin of 1.25, on the registered
+statistic.
+
+This is the fourth instrument fault on this gate and the first that was a fault
+of analysis rather than of code. The three before it made a number wrong. This
+one made the *question* wrong, after the fact, in the stricter direction — which
+is why registration specifies the statistic and not just the threshold, and why
+the earlier faults were caught while this one survived two reports.
+
+**Standing rule from this:** the verdict is computed from the statistic named in
+the registration. If a different statistic looks more informative after the data
+arrives, it is reported *beside* the registered one as a finding, never
+substituted for it.
+
+### What the tail still does not tell us
+
+Five tasks at one turn each cannot distinguish a fast path that is 2% dearer from
+one that is free. The claim supported is the registered one — no 25% penalty —
+and nothing finer. Per-pair cost on this suite is unpredictable within a factor
+of about eight for reasons that are not the routing, so **a future cost gate
+needs either many more pairs or multi-turn tasks**, where the per-turn figure
+that did hold steady here is the thing to measure.
