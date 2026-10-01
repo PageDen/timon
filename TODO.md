@@ -31,13 +31,14 @@ a way to build a commit from the index plus untracked paths without disturbing
 the working tree — `git stash create` will not do it, and nothing else obvious
 will either.
 
-**Task acceptance is never established.** The verifier checks execution, merge
-and the project's own tests, and reports task acceptance as *not established* on
-every run — because deciding whether prose criteria were met is judgement, and
-nothing here does judgement. Two things would change it: a planner that writes
-mechanically checkable criteria, and somewhere to put them. Until then every
-verdict carries "nobody checked that this did what was asked", which is true and
-is the point.
+**Acceptance criteria only describe files.** A criterion says a file exists,
+contains text, is absent, or no longer contains text — because a criterion is
+checked mechanically and those are the claims a machine can settle. Plenty of
+real requirements are not of that shape: "the endpoint returns 400 on bad input"
+needs the endpoint run, and running a model-chosen command is the model choosing
+its own permissions. A run whose requirements do not fit reports *not
+established*, which is honest and is also a real limit on how much the verifier
+can ever say.
 
 **A project declares its checks or gets none.** `git config timon.checks` is how
 a repository says what to run. Guessing a build command from a filename would

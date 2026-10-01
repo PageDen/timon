@@ -195,7 +195,7 @@ pub struct Subject<'a> {
     pub tested: Option<String>,
     /// Acceptance criteria written before execution, as the planner stated
     /// them. Empty means nobody wrote any — which is reported, not excused.
-    pub criteria: Vec<String>,
+    pub criteria: Vec<crate::acceptance::Criterion>,
 }
 
 /// How to run the project's own checks.
@@ -213,10 +213,10 @@ pub trait Checks {
     /// Returning `NotEstablished` is the honest default and the expected one:
     /// deciding whether a criterion in prose was met is judgement, and this
     /// module does not do judgement.
-    fn acceptance(&self, _criteria: &[String]) -> (Standing, String) {
+    fn acceptance(&self, _criteria: &[crate::acceptance::Criterion]) -> (Standing, String) {
         (
             Standing::NotEstablished,
-            "no mechanical check exists for these criteria, so nobody has \
+            "this host cannot check criteria against a tree, so nobody has \
              confirmed the work does what was asked"
                 .to_string(),
         )
@@ -431,6 +431,68 @@ impl ProjectChecks {
 }
 
 impl Checks for ProjectChecks {
+    /// Checks the planner's criteria against a checkout of the result branch.
+    ///
+    /// Against the merged result rather than any one worker's branch, because
+    /// what the developer is offered is the merge — and a criterion that held
+    /// in isolation and not after integration has not been met.
+    fn acceptance(&self, criteria: &[crate::acceptance::Criterion]) -> (Standing, String) {
+        if criteria.is_empty() {
+            return (
+                Standing::NotEstablished,
+                "no criteria were written".to_string(),
+            );
+        }
+        let (Some(repository), Some(branch)) = (self.repository.as_ref(), self.branch.as_ref())
+        else {
+            return (
+                Standing::NotEstablished,
+                "there is no branch to check the criteria against".to_string(),
+            );
+        };
+
+        let checkout =
+            std::env::temp_dir().join(format!("timon-acceptance-{}", std::process::id()));
+        let add = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args([
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                &checkout.to_string_lossy(),
+                branch,
+            ])
+            .output();
+        if !add.map(|out| out.status.success()).unwrap_or(false) {
+            return (
+                Standing::NotEstablished,
+                "the result branch could not be checked out, so the criteria were \
+                 not evaluated"
+                    .to_string(),
+            );
+        }
+
+        let report = crate::acceptance::check_all(&checkout, criteria);
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(["worktree", "remove", "--force", &checkout.to_string_lossy()])
+            .output();
+
+        let standing = if report.established() {
+            Standing::Holds
+        } else if report.checked.is_empty() {
+            // Nothing could be evaluated, so nothing was established — which is
+            // not the same as the work being wrong.
+            Standing::NotEstablished
+        } else {
+            Standing::Fails
+        };
+        (standing, report.summary())
+    }
+
     fn automated(&self) -> Option<CheckRun> {
         let repository = self.repository.as_ref()?;
         let declared = self.declared.as_ref()?;

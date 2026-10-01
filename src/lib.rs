@@ -3,6 +3,7 @@
 #[cfg(not(unix))]
 compile_error!("Timon supports Unix-like systems only.");
 
+pub mod acceptance;
 pub mod admission;
 pub mod attempt;
 pub mod bridge;
