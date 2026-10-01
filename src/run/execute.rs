@@ -34,6 +34,99 @@ use crate::triage::{Decision, Route};
 /// turns it into `x-timon-grant` on the request.
 pub const GRANT_ENV: &str = "TIMON_GRANT";
 
+/// The sandbox a worker runs under. Always stated, never inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Sandbox {
+    /// Can read the repository, cannot change it.
+    ReadOnly,
+    /// Can change files in its own worktree and nowhere else. P4.3 qualified it.
+    WorkspaceWrite,
+}
+
+impl Sandbox {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Sandbox::ReadOnly => "read-only",
+            Sandbox::WorkspaceWrite => "workspace-write",
+        }
+    }
+}
+
+/// The `codex exec` command a worker runs, pointed at the broker.
+///
+/// Two things are set here on the command line rather than left to whatever
+/// the developer's Codex configuration says, and both were found by looking at
+/// a real run's transcript rather than by any test:
+///
+/// **The provider.** A worker was handed its grant in `TIMON_GRANT` and the
+/// design assumed a provider in the developer's config would carry it to the
+/// broker. Nothing installed one. So every worker talked straight to OpenAI on
+/// the developer's own login, the broker forwarded nothing, and no run was ever
+/// paid from the pooled accounts — `requests_forwarded: 0` after a run, and
+/// `provider: openai` in its transcript. Now the provider is passed with the
+/// command: the worker sends its own login and the grant, and the broker strips
+/// the login and pays from a pooled account.
+///
+/// **The sandbox.** A worker given no `-s` inherits the developer's default,
+/// which on the host this was found on was `danger-full-access`. The run that
+/// wrote a file had the whole disk; it stayed in its worktree only because
+/// that was where it started. Every worker now states its sandbox.
+///
+/// The task still goes on stdin, never in the arguments, where every account on
+/// the host could read it from a process listing.
+pub fn worker_command(
+    broker: &str,
+    model: Option<&str>,
+    sandbox: Sandbox,
+) -> Vec<std::ffi::OsString> {
+    let mut command: Vec<std::ffi::OsString> = vec!["codex".into(), "exec".into()];
+    if let Some(model) = model {
+        command.push("-m".into());
+        command.push(model.into());
+    }
+    command.push("-s".into());
+    command.push(sandbox.as_str().into());
+    // Network off for the commands a worker runs, whatever the developer's
+    // config says. The host this was found on had `network_access = true` under
+    // `[sandbox_workspace_write]`, so workers could reach the network while the
+    // qualification record said `reach_git_remote: blocked` — the qualified state
+    // was not the state workers ran in. Model calls are made by Codex itself,
+    // outside the sandbox, so a worker loses nothing it needs.
+    command.push("-c".into());
+    command.push("sandbox_workspace_write.network_access=false".into());
+    for setting in provider_settings(broker) {
+        command.push("-c".into());
+        command.push(setting.into());
+    }
+    command.push("--skip-git-repo-check".into());
+    command.push("-".into());
+    command
+}
+
+/// The provider settings that send a worker's model calls to the broker.
+///
+/// `requires_openai_auth` because the upstream is the ChatGPT backend, which
+/// expects that request shape; the login the worker sends is stripped by the
+/// broker and replaced with a pooled account's, so it never reaches the
+/// provider. `env_http_headers` turns the grant into `x-timon-grant`.
+pub fn provider_settings(broker: &str) -> Vec<String> {
+    vec![
+        format!("model_provider=\"{PROVIDER}\""),
+        format!("model_providers.{PROVIDER}.name=\"Timon broker\""),
+        format!("model_providers.{PROVIDER}.base_url=\"http://{broker}\""),
+        format!("model_providers.{PROVIDER}.wire_api=\"responses\""),
+        format!("model_providers.{PROVIDER}.requires_openai_auth=true"),
+        format!(
+            "model_providers.{PROVIDER}.env_http_headers={{\"{}\"=\"{GRANT_ENV}\"}}",
+            crate::broker::grant::GRANT_HEADER
+        ),
+    ]
+}
+
+/// The provider name a worker's transcript reports when it is routed correctly.
+pub const PROVIDER: &str = "timon";
+
 /// Why a run could not be executed.
 #[derive(Debug)]
 pub enum ExecuteError {
@@ -219,6 +312,8 @@ pub struct Executed {
     pub output: Option<String>,
     pub reported_tokens: Option<u64>,
     pub detail: Option<String>,
+    /// The sandbox the worker actually ran under.
+    pub sandbox: Sandbox,
 }
 
 /// How a run is executed. None of it is the model's to choose.
@@ -240,6 +335,13 @@ pub struct Plan {
     /// permission rather than a detail: a run where the reading and writing
     /// commands are the same is a run where everything can write.
     pub write_command: Vec<std::ffi::OsString>,
+    /// The writing command for a single cheap worker. The strong one is
+    /// `write_command`.
+    pub cheap_write_command: Vec<std::ffi::OsString>,
+    /// Whether this host's write sandbox is qualified. A single-worker route
+    /// writes only when it is, which is the rule the planner route already
+    /// followed: absent qualification means shut, not assumed.
+    pub writing_permitted: bool,
     /// The models each route runs on. Fixed by the operator, like the commands.
     pub cheap_model: Option<String>,
     pub strong_model: Option<String>,
@@ -271,6 +373,14 @@ impl Plan {
         match route {
             Route::CheapWorker => Some(&self.cheap_command),
             Route::StrongWorker => Some(&self.strong_command),
+            Route::Planner => None,
+        }
+    }
+
+    fn write_command_for(&self, route: Route) -> Option<&Vec<std::ffi::OsString>> {
+        match route {
+            Route::CheapWorker => Some(&self.cheap_write_command),
+            Route::StrongWorker => Some(&self.write_command),
             Route::Planner => None,
         }
     }
@@ -338,6 +448,17 @@ pub async fn execute(
         None => None,
     };
 
+    // A single worker writes only into its own worktree, and only on a host
+    // whose write sandbox is qualified — the rule the planner route already
+    // followed. Without both, it runs read-only: it can still answer, and the
+    // report says why it could not change anything.
+    let (command, sandbox) = match plan.write_command_for(decision.route) {
+        Some(writing) if worktree.is_some() && plan.writing_permitted => {
+            (writing, Sandbox::WorkspaceWrite)
+        }
+        _ => (command, Sandbox::ReadOnly),
+    };
+
     let outcome = run_worker(
         run,
         command,
@@ -377,6 +498,7 @@ pub async fn execute(
         output: outcome.as_ref().ok().and_then(|o| o.output.clone()),
         reported_tokens: outcome.as_ref().ok().and_then(|o| o.tokens),
         detail,
+        sandbox,
     })
 }
 

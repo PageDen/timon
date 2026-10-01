@@ -18,6 +18,8 @@ fn plan(broker: &str, dir: &std::path::Path) -> Plan {
         cheap_command: vec!["/bin/cat".into()],
         strong_command: vec!["/bin/cat".into()],
         write_command: vec!["/bin/cat".into()],
+        cheap_write_command: vec!["/bin/cat".into()],
+        writing_permitted: false,
         cheap_model: Some("cheap-model".to_string()),
         strong_model: Some("strong-model".to_string()),
         output_root: dir.join("out"),
