@@ -372,16 +372,28 @@ struct WorkerOutput {
 /// without one. The planner is a worker like the others — it gets a task on
 /// stdin and returns text — so the only thing special about it is what is done
 /// with what it says.
+/// Everything that bounds a run, together.
+///
+/// Passed as one thing because they are one thing: the budget derives the
+/// others, and three separate parameters was three chances for a caller to pass
+/// a set that does not agree with itself.
+pub struct Envelope {
+    pub limits: crate::dag::Limits,
+    pub bounds: crate::dag_run::Bounds,
+    pub budget: crate::budget::Budget,
+}
+
 pub async fn execute_planned(
     runs: &Runs,
     run: &Run,
     decision: &Decision,
     plan: &Plan,
-    limits: &crate::dag::Limits,
-    bounds: crate::dag_run::Bounds,
+    envelope: &Envelope,
     now: i64,
 ) -> Result<crate::run::pipeline::PipelineReport, ExecuteError> {
-    use crate::run::pipeline::{Pipeline, accept, carry_out, parse_plan, plan_prompt};
+    let limits = &envelope.limits;
+    let budget = &envelope.budget;
+    use crate::run::pipeline::{Pipeline, accept_within, carry_out, parse_plan, plan_prompt};
 
     let Some(repository) = run.workspace.clone() else {
         return Err(ExecuteError::Planning(
@@ -419,7 +431,7 @@ pub async fn execute_planned(
         }
     };
 
-    let parsed = parse_plan(&answer).and_then(|plan| accept(&plan, limits));
+    let parsed = parse_plan(&answer).and_then(|plan| accept_within(&plan, limits, budget));
     let graph = match parsed {
         Ok(graph) => graph,
         Err(error) => {
@@ -458,7 +470,7 @@ pub async fn execute_planned(
         runner: &runner,
         workspace: None,
         limits: *limits,
-        bounds,
+        bounds: envelope.bounds,
         cancel: std::sync::Arc::clone(&plan.cancel),
     };
 

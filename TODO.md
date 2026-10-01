@@ -48,6 +48,14 @@ silent pass.
 
 ## Known limits, accepted for now
 
+**Triage misses a comma-separated list of deliverables.** "Write A, B, and C"
+reads as one deliverable, because the separators it looks for are `;`, ` then `,
+` and also ` and list markers — a comma and a bare "and" appear constantly in
+ordinary prose, and counting them would send single-piece work to the planner,
+which is the expensive mistake. Observed on 2026-10-01: a three-file goal went
+to one worker, which did all three in 46s. Not obviously wrong, but it was not a
+decision anybody made.
+
 **Triage sends long mechanical work to a strong call.** A 380-character
 extraction task a cheap call would handle is disqualified from the fast path by
 length alone. Length is weak evidence in both directions and the rules use it
