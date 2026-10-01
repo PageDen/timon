@@ -1451,6 +1451,15 @@ fn run_execute(
         }
     });
 
+    // And `timon runs cancel` from another terminal, which until now reached
+    // the record and the grant but not the worker: nothing new was authorised,
+    // while the turn already running carried on in a process that never read
+    // its own row. The record is the channel between the two processes.
+    let on_cancel = std::sync::Arc::clone(&cancel);
+    let watched = args.store.clone().unwrap_or_else(default_run_store);
+    let watched_run = run.id.clone();
+    runtime.spawn(timon::run::watch::watch(watched, watched_run, on_cancel));
+
     // The planner route runs a graph; the single-worker routes run one worker.
     // They share the grant and nothing else, so they are separate calls rather
     // than one function with a mode flag.
@@ -1568,7 +1577,11 @@ against its own criteria can make correct work worse."
             // leaving it marked running forever.
             let _ = runs.settle(
                 &run.id,
-                timon::run::record::Status::Finished,
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    timon::run::record::Status::Cancelled
+                } else {
+                    timon::run::record::Status::Finished
+                },
                 now,
                 Some(&format!("{error}")),
             );

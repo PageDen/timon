@@ -25,3 +25,4 @@ pub mod execute;
 pub mod pipeline;
 pub mod record;
 pub mod start;
+pub mod watch;
