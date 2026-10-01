@@ -1,0 +1,578 @@
+[
+ {
+  "task": "p1",
+  "kind": "dependent",
+  "rep": 0,
+  "arm_order": [
+   "pipeline",
+   "strong",
+   "cheap"
+  ],
+  "pipeline": {
+   "arm": "pipeline",
+   "tokens": 45985,
+   "secs": 74.5,
+   "established": 6,
+   "total": 6,
+   "detail": [
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/selection.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "continuity"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "capability"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "headroom"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/index.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/index.md",
+      "value": "selection.md",
+      "dependency": true
+     },
+     "passed": true,
+     "note": "found"
+    }
+   ],
+   "route": null,
+   "status": null,
+   "verdict": {
+    "outcome": "repairable",
+    "defect": "1 of 7 failed: docs/selection.md contains \"Continuity, then Capability, then Headro\u2026\" (not found in the file)"
+   },
+   "branch": null,
+   "budget_secs": 300,
+   "overrun_secs": 0.0,
+   "rescored_from_branch": true
+  },
+  "strong": {
+   "arm": "strong",
+   "tokens": 33382,
+   "secs": 39.2,
+   "established": 6,
+   "total": 6,
+   "detail": [
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/selection.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "continuity"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "capability"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "headroom"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/index.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/index.md",
+      "value": "selection.md",
+      "dependency": true
+     },
+     "passed": true,
+     "note": "found"
+    }
+   ],
+   "route": "strong",
+   "verdict": null,
+   "budget_secs": 300,
+   "overrun_secs": 0.0
+  },
+  "cheap": {
+   "arm": "cheap",
+   "tokens": 30425,
+   "secs": 49.2,
+   "established": 6,
+   "total": 6,
+   "detail": [
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/selection.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "continuity"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "capability"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "headroom"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/index.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/index.md",
+      "value": "selection.md",
+      "dependency": true
+     },
+     "passed": true,
+     "note": "found"
+    }
+   ],
+   "route": "cheap",
+   "verdict": null,
+   "budget_secs": 300,
+   "overrun_secs": 0.0
+  }
+ },
+ {
+  "task": "p1",
+  "kind": "dependent",
+  "rep": 1,
+  "arm_order": [
+   "strong",
+   "cheap",
+   "pipeline"
+  ],
+  "strong": {
+   "arm": "strong",
+   "tokens": 35008,
+   "secs": 38.9,
+   "established": 6,
+   "total": 6,
+   "detail": [
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/selection.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "continuity"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "capability"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "headroom"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/index.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/index.md",
+      "value": "selection.md",
+      "dependency": true
+     },
+     "passed": true,
+     "note": "found"
+    }
+   ],
+   "route": "strong",
+   "verdict": null,
+   "budget_secs": 300,
+   "overrun_secs": 0.0
+  },
+  "cheap": {
+   "arm": "cheap",
+   "tokens": 42151,
+   "secs": 63.0,
+   "established": 6,
+   "total": 6,
+   "detail": [
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/selection.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "continuity"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "capability"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "headroom"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/index.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/index.md",
+      "value": "selection.md",
+      "dependency": true
+     },
+     "passed": true,
+     "note": "found"
+    }
+   ],
+   "route": "cheap",
+   "verdict": null,
+   "budget_secs": 300,
+   "overrun_secs": 0.0
+  },
+  "pipeline": {
+   "arm": "pipeline",
+   "tokens": 109076,
+   "secs": 109.5,
+   "established": 6,
+   "total": 6,
+   "detail": [
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/selection.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "continuity"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "capability"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "headroom"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/index.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/index.md",
+      "value": "selection.md",
+      "dependency": true
+     },
+     "passed": true,
+     "note": "found"
+    }
+   ],
+   "route": null,
+   "status": null,
+   "verdict": {
+    "outcome": "pass"
+   },
+   "branch": null,
+   "budget_secs": 300,
+   "overrun_secs": 0.0,
+   "rescored_from_branch": true
+  }
+ },
+ {
+  "task": "p1",
+  "kind": "dependent",
+  "rep": 2,
+  "arm_order": [
+   "cheap",
+   "pipeline",
+   "strong"
+  ],
+  "cheap": {
+   "arm": "cheap",
+   "tokens": 23410,
+   "secs": 45.4,
+   "established": 6,
+   "total": 6,
+   "detail": [
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/selection.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "continuity"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "capability"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "headroom"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/index.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/index.md",
+      "value": "selection.md",
+      "dependency": true
+     },
+     "passed": true,
+     "note": "found"
+    }
+   ],
+   "route": "cheap",
+   "verdict": null,
+   "budget_secs": 300,
+   "overrun_secs": 0.0
+  },
+  "pipeline": {
+   "arm": "pipeline",
+   "tokens": 149904,
+   "secs": 87.6,
+   "established": 6,
+   "total": 6,
+   "detail": [
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/selection.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "continuity"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "capability"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/selection.md",
+      "value": "headroom"
+     },
+     "passed": true,
+     "note": "found"
+    },
+    {
+     "criterion": {
+      "kind": "file_exists",
+      "path": "docs/index.md"
+     },
+     "passed": true,
+     "note": "present"
+    },
+    {
+     "criterion": {
+      "kind": "contains",
+      "path": "docs/index.md",
+      "value": "selection.md",
+      "dependency": true
+     },
+     "passed": true,
+     "note": "found"
+    }
+   ],
+   "route": null,
+   "status": null,
+   "verdict": {
+    "outcome": "repairable",
+    "defect": "2 of 6 failed: docs/selection.md contains \"continuity\" (not found in the file); docs/selection.md contains \"capability\" (not found in the file)"
+   },
+   "branch": null,
+   "budget_secs": 300,
+   "overrun_secs": 0.0,
+   "rescored_from_branch": true
+  },
+  "stopped": true
+ }
+]

@@ -402,3 +402,226 @@ would reintroduce the confound that made run 1 of the P2 gate read 1.495 against
 a true 1.129.
 
 `--dry-run` prints the full schedule and arm order and spends nothing.
+
+## Stage one — 2026-10-01 — the suite cannot answer the question
+
+Ran `--task p1`, three repeats, on `acct3`, `gpt-5.6-luna` as strong and
+`gpt-5.5` as cheap, binary `b820dc9` built `--release`. **It stopped itself at
+the ceiling after 8 of 9 sessions: 469,341 tokens against a ceiling of 400,000.**
+
+The stop rule worked exactly as registered — it halted for a decision and did
+not switch accounts. But the estimate it was sized against was wrong again:
+**~150k predicted, 469k spent, off by a factor of three.** That is the second
+time this gate's spend estimate has been wrong in the same direction, and the
+first correction was itself a 2× revision made the same day.
+
+### An instrument fault, and the worst-shaped one yet
+
+Every pipeline run was recorded as **0 of 6**. All three result branches on disk
+in fact held **6 of 6**.
+
+The two routes print different JSON. The single-worker route wraps its record as
+`{"run": {… "branch": …}}`; the planner route emits a flat object with
+`result_branch` at the top level. The runner read only the first, found no
+branch, checked out nothing, and scored the default zero.
+
+It cost nothing to correct, because the branches and transcripts were kept —
+the same reason three faults on the P2 gate were free to fix. But this one is
+worse in shape than those: it did not produce a *missing* number, it produced a
+**confident wrong one that pointed at the conclusion I was most primed to
+believe** — that the planner path does not work. A harness that cannot find the
+work and a pipeline that produced none are opposite findings from an identical
+`0/6`. The runner now refuses rather than scoring zero when no branch is in the
+report, and reads both shapes.
+
+A second fault alongside it: all three repeats shared one output directory, so
+two of the three reports were overwritten and only the last could be re-read.
+Both are fixed; neither changes what was spent.
+
+### The gates, on rescored data
+
+| Gate | Result |
+|---|---|
+| 1 Verdict honesty | **PASS** — no run claimed `done` without its criteria holding |
+| 3 Budget | **PASS** — 74.5s, 109.5s, 87.6s against a 300s budget |
+| 2 Deliverables | **INCONCLUSIVE** — pipeline 1.000, strong 1.000, cheap 1.000 |
+| 4 Cost | **FAIL** — 18,179 tokens per criterion against 5,699; ratio 3.19, margin 2.0 |
+
+### What gate 2 actually revealed, which is about the suite
+
+**The cheap arm scored 6 of 6.** That arm exists for exactly one purpose — to
+detect a suite so easy that a single cheap call matches the pipeline — and it
+fired on the first task. All three arms were perfect, so the comparison cannot
+distinguish them and gate 4's failure means only that the pipeline charged three
+times as much for work a cheap call already did.
+
+The plan's own requirement for P8 reads: *"Suite must include work a single call
+cannot do well, since that is the planner path's claimed territory."* **p1 is not
+that, and the registration should have been refused on those grounds before
+anything ran.** I wrote both documents and did not check one against the other.
+
+### The dependencies were never dependencies
+
+The planner emitted `depends_on: []` for both of p1's tasks, with a note that
+they were independent — and it was **right**. p1's goal names `docs/selection.md`
+in the text, so the index task never needed the first deliverable's output.
+
+The same holds across the suite. p2's summary needs the three *values*, which
+both tasks can read from source independently. p4's redaction can be written
+without reading the unredacted file, because the goal states both account names.
+**All five criteria marked `dependency: true` are satisfiable by two independent
+workers reading the same source**, so the suite does not exercise P3's dependency
+machinery at all, despite the suite file asserting that it does.
+
+There is a structural reason, worth stating because it constrains any fix: a
+criterion that is *fixed in advance* and *mechanically checkable* cannot depend
+on a free choice the first worker makes at runtime. Those two requirements pull
+against dependency testing. The way through is a **cross-file consistency**
+criterion — every `##` heading in A also appears in B — which is checkable, fixed
+as a rule rather than a string, and genuinely requires B to read A.
+
+**That change is not applied to stage one.** The planner's behaviour has now been
+observed, so altering the criteria would be fitting the test to the result, which
+is the fault corrected in `registration-p2.md`. Stage one stands as scored.
+
+### The pipeline's cost rose across identical repeats
+
+45,985 → 109,076 → 149,904 tokens for the same task, in run order. Over three
+points this is not a trend, and no mechanism is established. Recorded because it
+is the opposite of what a warming prompt cache would do and it is the largest
+unexplained thing in the data.
+
+### Recommendation: do not run stage two
+
+Stage two would spend roughly 1.5M more tokens measuring the same
+non-distinction across four more tasks built the same way. What is needed first:
+
+1. **A suite of work a single call demonstrably cannot do well.** Until the cheap
+   arm stops scoring full marks, gate 2 cannot report anything and gate 4's
+   verdict is not about the pipeline.
+2. **Real dependencies**, via the cross-file criterion above.
+3. **Re-registration** of both, since the suite is the measuring instrument and
+   it has been shown not to measure what it claimed.
+
+What stage one did establish, and it is not nothing: the planner path runs end to
+end, plans sensibly, writes to worktrees, integrates to a result branch, and
+produces work that satisfies every registered criterion — three times out of
+three. Gates 1 and 3 pass on real data. The budget bound held under concurrency
+for the first time.
+
+## Stage one — 2026-10-01 — `p1`, 3 repeats, `acct3`
+
+Binary `b820dc9` built `--release`, because gate 3 is a wall-clock bound and
+measuring a debug build against a 300-second budget would test the compiler.
+Strong `gpt-5.6-luna`, cheap `gpt-5.5`, assigned by Chris.
+
+| pair | arm | established | tokens | secs | over |
+|---|---|---|---|---|---|
+| p1-0 | pipeline | 6/6 | 45,985 | 74.5 | 0 |
+| p1-0 | strong | 6/6 | 33,382 | 39.2 | 0 |
+| p1-0 | cheap | 6/6 | 30,425 | 49.2 | 0 |
+| p1-1 | pipeline | 6/6 | 109,076 | 109.5 | 0 |
+| p1-1 | strong | 6/6 | 35,008 | 38.9 | 0 |
+| p1-1 | cheap | 6/6 | 42,151 | 63.0 | 0 |
+| p1-2 | pipeline | 6/6 | 149,904 | 87.6 | 0 |
+| p1-2 | cheap | 6/6 | 23,410 | 45.4 | 0 |
+
+**469,341 tokens over 8 sessions. The ceiling stopped the ninth** — `p1-2`'s
+strong arm — and it did not continue and did not switch accounts. The stop rule
+works; it is the only thing in this document that had never been exercised.
+
+### Gate 1 — PASS
+
+No run claimed `done` or `pass` without its registered criteria holding.
+
+Two of the three **under-claimed**, which is the opposite error and not a gate-1
+failure. The planner wrote itself *seven* criteria for a task the registration
+gives six, including the exact phrase *"Continuity, then Capability, then
+Headroom"*, and then honestly reported `repairable` because its own stricter
+criterion was unmet while all six registered ones held. A verifier that cries
+defect on good work costs a developer a review pass, so it is recorded — but it
+is the failure mode to prefer.
+
+### Gate 3 — PASS
+
+Maximum overrun zero. The worst run used 109.5s of a 300s budget. The budget
+claim had never been tested end to end under concurrency; it holds.
+
+### Gate 2 — INCONCLUSIVE by the rule, and the rule is not the finding
+
+**Every arm scored 6/6 on every run.** The registered statistic is therefore
+1.000 against 1.000 with identical interquartile ranges, which the registration
+requires be called inconclusive.
+
+But the honest reading is the cheap arm's: **`p1` is too easy to distinguish
+anything.** A single cheap call established all six criteria, three times out of
+three. That is exactly the signal the cheap arm was registered to produce —
+*"if a cheap call establishes as many criteria as the pipeline on these tasks,
+the suite is too easy and the gate says so."* It said so.
+
+### Gate 4 — FAIL, and confounded
+
+| | tokens per established criterion |
+|---|---|
+| pipeline | 18,179 |
+| strong | 5,699 |
+| **ratio** | **3.190** against a margin of 2.0 |
+
+A real failure on the registered statistic. It is also predictable on a task
+where every arm delivers the same six criteria: with the denominator identical,
+cost per unit delivered reduces to raw cost, and the planner path spends a
+planner call plus two workers plus a judge to reach what one cheap call reached.
+**This number should not be read as "the planner path costs 3.2× too much."** It
+should be read as "on work a cheap call does perfectly, the planner path costs
+3.2× more", which is a statement about the suite as much as the route.
+
+### What stage one actually bought
+
+Three more instrument faults, all on first contact with real data, and all in
+code I had already called validated:
+
+1. **The result branch was never read.** The planner route emits a flat object
+   with `result_branch`; the runner read `report["run"]["branch"]`, the
+   single-worker shape. Branch was `None` every time, nothing was checked out,
+   and **every pipeline run was recorded as 0 of 6** while the branches on disk
+   each held 6 of 6. A confident wrong number rather than a refusal.
+2. **Repeats overwrote each other.** `run_out` was keyed by task and not by
+   repeat, so `stdout.json` and `stderr.log` survived only for the last of three
+   runs. The token sums escaped only because they were already scoped by run id.
+3. **The reporter crashed on the verdict.** `verdict.outcome` is a tagged object
+   on the planner route, not a string, and `.lower()` raised on the first real
+   data the reporter ever saw. At least this one was loud.
+
+Faults 7, 8 and 9 in this project. **Re-scoring cost a git checkout**, because
+the result branches were kept — the same reason the P2 gate's three faults cost
+nothing. `eval/rescore-gate-p6.py` recovered all three runs from their branches.
+
+And one flaw in the suite itself, found by reading the plan the planner produced:
+
+4. **The suite does not test dependency handling, though it claims to.** The
+   planner emitted `depends_on: []` for both of `p1`'s tasks with a note that
+   they are independent, and it was right: `p1`'s goal names `docs/selection.md`,
+   so the index task never needed the first deliverable's *output*. The same
+   holds for `p2`, whose summary needs values both tasks can read from source,
+   and `p4`, whose goal states both account names. **All five criteria marked
+   `dependency: true` are satisfiable by two independent workers reading the same
+   source.** The suite's own `purpose` field asserts otherwise and is wrong.
+
+There is a structural reason, worth stating because it constrains any fix: a
+criterion that is **fixed in advance** and **mechanically checkable** cannot
+depend on a free choice a worker makes at runtime. A cross-file consistency rule
+— every `##` heading in A also appears in B — would be checkable, fixed as a
+rule, and genuinely require B to read A. **It is not applied here.** Stage one's
+behaviour has now been seen, so changing the criteria would be adapting the test
+to the result, which is the fault this document exists to prevent.
+
+### Recommendation: do not run stage two as designed
+
+Stage two would spend roughly 2M more tokens to measure a suite that cannot
+separate the arms on its easiest task. What is needed first is tasks where a
+single cheap call does *not* score 6/6 — the planner path's claimed territory —
+and, if dependency handling is to be tested at all, a criterion kind that can
+express it.
+
+Stage one cost 469,341 tokens and 25 minutes to establish that. The full gate
+would have cost five times as much to establish the same thing.

@@ -1,7 +1,7 @@
 {
   "registered": "2026-10-01",
   "gate": "P6",
-  "purpose": "The pipeline gate. Every task has several deliverables, at least one criterion that can only be satisfied by having read another deliverable, and acceptance decided by path and string checks rather than by a judgement.",
+  "purpose": "The pipeline gate. Every task has several deliverables and acceptance decided by path and string checks rather than by a judgement.",
   "why_mechanical": "A model judging a model is another instrument to validate before it can be trusted, and this gate exists partly to test the model-based verifier. Criteria here are settled by reading the result branch, so the instrument stays out of the argument.",
   "ground_truth_taken": "2026-10-01 at commit fc7a29d, by reading src/broker/select.rs, src/broker/refresh.rs, src/broker/quota.rs, src/broker/grant.rs, src/budget.rs, src/qualify.rs, src/verify.rs and src/run/record.rs directly. Recorded so a later disagreement is settled against the repository rather than against anyone's memory.",
   "criteria_are_fixed": "Written here in advance. Criteria the planner invents at runtime are recorded but never scored, because a planner that writes itself an easy criterion would otherwise score full marks. It has already done this once: 'TESTING.md contains test', true of any file with that name.",
@@ -40,7 +40,7 @@
           "kind": "contains",
           "path": "docs/index.md",
           "value": "selection.md",
-          "dependency": true
+          "dependency_intended_not_real": true
         }
       ]
     },
@@ -78,13 +78,13 @@
           "path": "docs/limits-summary.md",
           "value": "MAX_LIFETIME_SECS",
           "exact": true,
-          "dependency": true
+          "dependency_intended_not_real": true
         },
         {
           "kind": "contains",
           "path": "docs/limits-summary.md",
           "value": "43200",
-          "dependency": true
+          "dependency_intended_not_real": true
         }
       ]
     },
@@ -153,13 +153,13 @@
           "kind": "absent_text",
           "path": "docs/accounts-public.md",
           "value": "acct2",
-          "dependency": true
+          "dependency_intended_not_real": true
         },
         {
           "kind": "absent_text",
           "path": "docs/accounts-public.md",
           "value": "acct3",
-          "dependency": true
+          "dependency_intended_not_real": true
         }
       ]
     },
@@ -185,7 +185,9 @@
   "totals": {
     "tasks": 5,
     "criteria": 27,
-    "dependency_criteria": 5,
-    "note": "A per-arm score is a count out of 27. Gate 2 compares the medians of the per-task counts, not this total, because a total lets one task with many criteria dominate."
-  }
+    "dependency_criteria": 0,
+    "note": "A per-arm score is a count out of 27. Gate 2 compares the medians of the per-task counts, not this total, because a total lets one task with many criteria dominate.",
+    "dependency_intended_not_real": 5
+  },
+  "dependency_claim_withdrawn": "This file originally claimed every task had 'at least one criterion that can only be satisfied by having read another deliverable'. Stage one disproved it on 2026-10-01: the planner emitted depends_on: [] for both of p1's tasks and was correct, because p1's goal names docs/selection.md and so the index task never needed the first deliverable's output. The same holds for p2, whose summary needs values both tasks can read from source, and p4, whose goal states both account names. All five criteria flagged 'dependency' are satisfiable by two independent workers reading the same source, so the flag now means 'intended as a dependency and is not one'. The suite does not test P3's dependency machinery. A cross-file consistency criterion would, and is deliberately not added here: stage one's behaviour has been seen, and changing criteria after seeing results is the fault the registration exists to prevent."
 }

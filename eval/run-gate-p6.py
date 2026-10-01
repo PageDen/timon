@@ -134,9 +134,13 @@ def run_single(task, arm, model, args, out):
     }
 
 
-def run_pipeline(task, args, out):
+def run_pipeline(task, rep, args, out):
     """The whole route: triage, planner, workers, integration, verification."""
-    run_out = Path(out) / f"{task['id']}-pipeline"
+    # Keyed by repeat. Sharing one directory across repeats overwrote
+    # stdout.json and stderr.log each time, so stage one kept only the last of
+    # three reports. The token sum survived only because it was already scoped
+    # by run id.
+    run_out = Path(out) / f"{task['id']}-{rep}-pipeline"
     # 0700: a worker refuses an output directory that group or others can read,
     # which is right — its output can contain whatever it was working on. The
     # default umask here gives 0755 and the run fails before it starts.
@@ -166,13 +170,23 @@ def run_pipeline(task, args, out):
         report = json.loads(done.stdout)
     except json.JSONDecodeError:
         report = {}
-    run = report.get("run", {})
-    branch = run.get("branch")
+    # Two shapes, because two routes. The single-worker route wraps its record
+    # as {"run": {...branch...}}; the planner route emits a flat object with
+    # `result_branch` at the top level. Reading only the first gave branch=None
+    # for every planner run, so nothing was checked out and stage one recorded
+    # 0 of 6 three times while the branches on disk each held 6 of 6. A
+    # confident wrong number, not a refusal — the seventh instrument fault here
+    # and the worst-shaped one.
+    run = report.get("run") if isinstance(report.get("run"), dict) else report
+    branch = run.get("branch") or report.get("result_branch")
+    if branch is None and report:
+        print(f"    no result branch in the report for {task['id']}-{rep}; "
+              f"keys were {sorted(report)}", flush=True)
 
     # Score the result branch, never the pipeline's own verdict about it.
     established, total, detail = 0, len(task["criteria"]), []
     if branch:
-        tree = Path(out) / f"{task['id']}-pipeline-result"
+        tree = Path(out) / f"{task['id']}-{rep}-pipeline-result"
         git("worktree", "add", "--detach", str(tree), branch)
         rows = score_tree(args.suite_data, tree, {task["id"]})
         established, total, detail = rows[0]["established"], rows[0]["total"], rows[0]["detail"]
@@ -209,6 +223,7 @@ def run_pipeline(task, args, out):
         "arm": "pipeline", "tokens": tokens if seen else None, "secs": round(secs, 1),
         "established": established, "total": total, "detail": detail,
         "route": run.get("route"), "status": run.get("status"),
+        "graph": report.get("graph", {}).get("complete"),
         "verdict": (report.get("verdict") or {}).get("outcome")
                    or (report.get("verdict") or {}).get("status"),
         "branch": branch,
@@ -294,9 +309,9 @@ def main():
         for rep in range(args.repeats)
     ]
 
-    print(f"{len(schedule)} pairs × 3 arms = {len(schedule) * 3} sessions")
+    print(f"{len(schedule)} pairs × 3 arms = {len(schedule) * 3} sessions", flush=True)
     print(f"account {args.account}, ceiling {args.ceiling_tokens:,} tokens, "
-          f"budget {args.budget_secs}s, seed {args.seed}")
+          f"budget {args.budget_secs}s, seed {args.seed}", flush=True)
     if args.dry_run:
         for task, rep, arms in schedule:
             print(f"  {task['id']}-{rep}  {' → '.join(arms)}")
@@ -317,15 +332,18 @@ def main():
                 json.dump(results, open(out / "results.json", "w"), indent=1)
                 return 3
             if arm == "pipeline":
-                got = run_pipeline(task, args, out)
+                got = run_pipeline(task, rep, args, out)
             else:
                 model = args.strong_model if arm == "strong" else args.cheap_model
                 got = run_single(task, arm, model, args, out)
             spent += got["tokens"] or 0
             record[arm] = got
             flag = "  OVERRUN" if got["overrun_secs"] > 0 else ""
+            # flush: redirected to a file, Python buffers this and a run that
+            # takes twenty minutes shows nothing at all until it exits. A gate
+            # that cannot be watched cannot be stopped early for a good reason.
             print(f"  {task['id']}-{rep} {arm:9} {got['established']}/{got['total']} "
-                  f"{(got['tokens'] or 0):>8,}tok {got['secs']:>6.1f}s{flag}")
+                  f"{(got['tokens'] or 0):>8,}tok {got['secs']:>6.1f}s{flag}", flush=True)
         results.append(record)
         json.dump(results, open(out / "results.json", "w"), indent=1)
 

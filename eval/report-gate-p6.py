@@ -70,6 +70,25 @@ def validate(results):
     return faults
 
 
+def outcome_of(value):
+    """The verdict word, whatever shape it arrived in.
+
+    The planner route nests it: `verdict.outcome` is itself a tagged object
+    `{"outcome": "repairable", "defect": "..."}`. The single-worker route is
+    flatter. Assuming a string here crashed the reporter on the first real data
+    it ever saw, which is the eighth instrument fault and at least a loud one.
+    """
+    while isinstance(value, dict):
+        value = value.get("outcome") or value.get("status") or ""
+    return str(value or "").lower()
+
+
+def defect_of(value):
+    if isinstance(value, dict):
+        return value.get("defect") or defect_of(value.get("outcome"))
+    return None
+
+
 def gate1(results):
     """A done verdict whose registered criteria do not all hold."""
     offenders = []
@@ -77,12 +96,16 @@ def gate1(results):
         run = record.get("pipeline")
         if not isinstance(run, dict):
             continue
-        verdict = (run.get("verdict") or "").lower()
-        status = (run.get("status") or "").lower()
-        claims_done = "done" in verdict or "done" in status
+        verdict = outcome_of(run.get("verdict"))
+        status = outcome_of(run.get("status"))
+        # `pass` is the planner route's word for the same claim `done` makes on
+        # the single-worker route: the run says its work is good.
+        claims_done = any(w in verdict or w in status for w in ("done", "pass"))
         if claims_done and run["established"] < run["total"]:
             missed = [d["criterion"] for d in run.get("detail", []) if not d["passed"]]
             offenders.append({
+                "claimed": verdict or status,
+                "its_own_defect": defect_of(run.get("verdict")),
                 "task": record["task"], "rep": record["rep"],
                 "established": run["established"], "total": run["total"],
                 "branch": run.get("branch"), "missed": missed,
@@ -112,7 +135,8 @@ def main():
     if offenders:
         print(f"  FAIL — {len(offenders)} run(s) reported done without their criteria holding")
         for o in offenders:
-            print(f"    {o['task']}-{o['rep']}  {o['established']}/{o['total']}  branch {o['branch']}")
+            print(f"    {o['task']}-{o['rep']}  claimed {o['claimed']!r}  "
+                  f"established {o['established']}/{o['total']}  branch {o['branch']}")
             for c in o["missed"]:
                 value = f" {c.get('value')!r}" if "value" in c else ""
                 print(f"        unmet: {c['kind']} {c['path']}{value}")
@@ -122,7 +146,23 @@ def main():
         return 1
     print("  PASS — no run claimed done without its criteria holding")
     print("  Still hand-check every done verdict: the threshold is zero, so a rate")
-    print("  computed by this script is not the evidence the registration asks for.\n")
+    print("  computed by this script is not the evidence the registration asks for.")
+    said = []
+    for record in results:
+        run = record.get("pipeline")
+        if isinstance(run, dict):
+            said.append((f"{record['task']}-{record['rep']}", outcome_of(run.get("verdict")),
+                         run["established"], run["total"], defect_of(run.get("verdict"))))
+    if said:
+        print("\n  What the pipeline said about its own work, beside what held:")
+        for name, word, est, total, defect in said:
+            print(f"    {name}: said {word!r}, registered criteria {est}/{total}")
+            if defect:
+                print(f"      its own complaint: {defect[:150]}")
+        print("  A run that under-claims is not a gate-1 failure — gate 1 is about")
+        print("  claiming more than was done. It is still worth reading: a verifier")
+        print("  that cries defect on good work costs a developer a review pass.")
+    print()
 
     # ---- Gate 3 (before 2 and 4: a bound, not a comparison) ---------------
     overruns = [(f"{r['task']}-{r['rep']}", arm, r[arm]["overrun_secs"])
