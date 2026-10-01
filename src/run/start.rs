@@ -129,7 +129,9 @@ pub fn admit(
         max_attempts: request.max_attempts,
         token_ceiling: request.token_ceiling,
         deadline: request.deadline,
-        status: Status::Running,
+        // Recorded, not running: `--execute` is what moves it on. A preflight
+        // that claimed to be running never stopped claiming it.
+        status: Status::Recorded,
         started_at: now,
         ended_at: None,
         detail: None,

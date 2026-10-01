@@ -43,6 +43,10 @@ fn started(dir: &std::path::Path, goal: &str) -> (Runs, String) {
     )
     .unwrap();
     let id = run.id.clone();
+    // `admit` records a run as `Recorded`; `--execute` promotes it to `Running`
+    // at the moment something is actually sent to a model. These tests are about
+    // a run that is executing, so they promote it the same way.
+    runs.settle(&id, Status::Running, NOW, None).unwrap();
     (runs, id)
 }
 

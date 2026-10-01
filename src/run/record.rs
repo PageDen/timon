@@ -19,6 +19,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
+    /// Admitted and recorded, but nothing has been sent to a model.
+    ///
+    /// What `timon run` without `--execute` leaves behind. It used to be
+    /// recorded as `running`, which meant every preflight sat in `timon status`
+    /// as work in progress forever — there is no path that resumes one, so it
+    /// was describing a run that would never move again.
+    Recorded,
     /// Admitted and executing.
     Running,
     /// Finished, whatever the verdict on the work.
@@ -34,6 +41,7 @@ pub enum Status {
 impl Status {
     pub fn as_str(self) -> &'static str {
         match self {
+            Status::Recorded => "recorded",
             Status::Running => "running",
             Status::Finished => "finished",
             Status::Cancelling => "cancelling",
@@ -44,6 +52,7 @@ impl Status {
 
     pub fn parse(text: &str) -> Option<Self> {
         Some(match text {
+            "recorded" => Status::Recorded,
             "running" => Status::Running,
             "finished" => Status::Finished,
             "cancelling" => Status::Cancelling,
@@ -55,8 +64,16 @@ impl Status {
 
     /// True when this run is still going, and so is a candidate for recovery or
     /// cancellation.
+    ///
+    /// `Recorded` is deliberately not live: nothing is running, nothing can be
+    /// cancelled, and no watcher should poll it.
     pub fn live(self) -> bool {
         matches!(self, Status::Running | Status::Cancelling)
+    }
+
+    /// Whether this run ever reached a model.
+    pub fn spent_anything(self) -> bool {
+        !matches!(self, Status::Recorded)
     }
 }
 

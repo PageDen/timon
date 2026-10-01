@@ -28,6 +28,19 @@ use timon::worker::{WorkerLimits, WorkerSpec};
 
 /// Exit code when no worker slot is free (EX_TEMPFAIL).
 const EXIT_NO_SLOT: u8 = 75;
+
+/// Where the broker listens unless something says otherwise. Loopback: it holds
+/// the credentials, so nothing off this host should be able to reach it.
+const DEFAULT_BROKER: &str = "127.0.0.1:1456";
+
+/// How long a whole run may take unless something says otherwise.
+///
+/// Fifteen minutes, not five. The budget is divided between the planner and
+/// each level of the graph, so a 300-second run gives each worker 60 seconds —
+/// and the first real two-file hand-off on this host lost a task to exactly
+/// that, while the task that did finish took longer than a minute on its own.
+/// A default that times out on ordinary work is a bad default.
+const DEFAULT_BUDGET_SECS: u64 = 900;
 /// The run's own allowance is used up (EX_UNAVAILABLE).
 ///
 /// Distinct from `EXIT_NO_SLOT`: a busy host frees up, a spent run does not, so
@@ -81,6 +94,453 @@ enum Command {
     Runs(RunsCommand),
     /// Show how a goal would be routed, without recording or running anything.
     Triage(TriageArgs),
+    /// The settings a run uses when the flags do not say.
+    #[command(subcommand)]
+    Config(ConfigCommand),
+    /// Is Timon ready to take work: the broker, the accounts, recent runs.
+    Status,
+    /// Whether this host may run workers that change files.
+    #[command(subcommand)]
+    Qualify(QualifyCommand),
+}
+
+#[derive(Subcommand)]
+enum QualifyCommand {
+    /// Say whether writing is permitted here, and what to do if not.
+    Status,
+    /// Register a qualification record produced by probing this host.
+    Accept(QualifyAcceptArgs),
+}
+
+#[derive(Args)]
+struct QualifyAcceptArgs {
+    /// The record to register, as written when the sandbox was probed.
+    record: PathBuf,
+    /// Register it even though it names a different host. Requires saying so,
+    /// because a sandbox that held on one machine is not evidence about another.
+    #[arg(long)]
+    not_this_host: bool,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Write a starter config, without overwriting one that exists.
+    Init,
+    /// Where the config is read from.
+    Path,
+    /// What is in effect, and whether it came from the file or a default.
+    Show,
+}
+
+/// This host's name, as a qualification record spells it.
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|name| name.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Says whether writing is permitted, and what to do when it is not.
+fn qualify_status() -> Result<u8> {
+    let installed = timon::config::timon_home().join("qualification.json");
+    match qualification_path() {
+        Some(path) => {
+            println!("writing   permitted");
+            println!("record    {}", path.display());
+            if let Ok(raw) = std::fs::read_to_string(&path)
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw)
+            {
+                if let Some(host) = value["host"].as_str() {
+                    let note = if host == hostname() {
+                        ""
+                    } else {
+                        "  (NOT this host — the sandbox was probed elsewhere)"
+                    };
+                    println!("host      {host}{note}");
+                }
+                if let Some(codex) = value["codex"].as_str() {
+                    println!("codex     {codex}  (a version bump re-opens this question)");
+                }
+            }
+            Ok(0)
+        }
+        None => {
+            println!("writing   NOT permitted");
+            println!();
+            println!("Workers that change files are disabled here, so a hand-off that");
+            println!("needs to write will report its tasks as not run. The plan requires");
+            println!("the sandbox be qualified before any worker writes, and absent");
+            println!("means shut rather than assumed.");
+            println!();
+            println!("To enable it, register a record produced by probing this host:");
+            println!("  timon qualify accept <record.json>");
+            println!();
+            println!("It would be installed at {}", installed.display());
+            Ok(1)
+        }
+    }
+}
+
+/// Registers a qualification record for this host.
+fn qualify_accept(args: QualifyAcceptArgs) -> Result<u8> {
+    let raw = std::fs::read_to_string(&args.record)
+        .with_context(|| format!("reading {}", args.record.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("{} is not JSON", args.record.display()))?;
+
+    let named = value["host"].as_str().unwrap_or("");
+    let mine = hostname();
+    if named != mine && !args.not_this_host {
+        eprintln!(
+            "timon: that record was taken on {:?}, and this host is {mine:?}. A \
+             sandbox that held on one machine is not evidence about another. Pass \
+             --not-this-host to register it anyway.",
+            named
+        );
+        return Ok(1);
+    }
+
+    if !qualified_by(&args.record) {
+        eprintln!(
+            "timon: {} does not record a passing run, so registering it would \
+             enable writing on evidence that says the sandbox leaked.",
+            args.record.display()
+        );
+        return Ok(1);
+    }
+
+    let home = timon::config::timon_home();
+    std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
+    let installed = home.join("qualification.json");
+    std::fs::write(&installed, &raw).with_context(|| format!("writing {}", installed.display()))?;
+    println!("registered {}", installed.display());
+    println!("Writing workers are enabled on this host. `timon qualify status` confirms.");
+    Ok(0)
+}
+
+/// Fills in from the config whatever the flags left unsaid.
+///
+/// Flags win, always. A setting absent from both falls back to the built-in,
+/// which is what `timon config show` reports as `default`.
+///
+/// `--execute` is deliberately not here. Recording a run and paying for one
+/// should not be the same keystroke, and a config file that could flip that
+/// would quietly make it one.
+fn apply_config(args: &mut HandoffArgs) -> Result<(), String> {
+    let settings = timon::config::load()?;
+
+    if args.accounts.is_empty()
+        && let Some(accounts) = settings.accounts
+    {
+        args.accounts = accounts;
+    }
+    if args.cheap_model.is_none() {
+        args.cheap_model = settings.cheap_model;
+    }
+    if args.strong_model.is_none() {
+        args.strong_model = settings.strong_model;
+    }
+    if args.broker.is_none() {
+        args.broker = settings.broker;
+    }
+    if args.budget_secs.is_none() {
+        args.budget_secs = settings.budget_secs;
+    }
+    if args.concurrency.is_none() {
+        args.concurrency = settings.concurrency;
+    }
+    if args.store.is_none() {
+        args.store = settings.store.map(|p| timon::config::expand(&p));
+    }
+    if args.output_root.is_none() {
+        args.output_root = settings.output_root.map(|p| timon::config::expand(&p));
+    }
+    // A flag can only turn this on, so either source enabling it is enough.
+    args.allow_planner |= settings.allow_planner.unwrap_or(false);
+    Ok(())
+}
+
+/// Writes a starter config, refusing to clobber one that exists.
+fn config_init() -> Result<u8> {
+    let file = timon::config::path();
+    if file.exists() {
+        eprintln!(
+            "timon: {} already exists. Nothing was written; edit it, or move it \
+             aside first.",
+            file.display()
+        );
+        return Ok(1);
+    }
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(&file, timon::config::starter())
+        .with_context(|| format!("writing {}", file.display()))?;
+    println!("wrote {}", file.display());
+    println!("Every setting is commented out, so this changes nothing until you");
+    println!("uncomment something. `timon config show` prints what is in effect.");
+    Ok(0)
+}
+
+/// What a run would use, and where each value came from.
+///
+/// The provenance column is the point. A developer debugging "why did it use
+/// that account" needs to know whether the answer is their file or a built-in,
+/// and a settings dump without it just moves the question.
+fn config_show() -> Result<u8> {
+    let file = timon::config::path();
+    let settings = match timon::config::load() {
+        Ok(settings) => settings,
+        Err(why) => {
+            eprintln!("timon: {why}");
+            return Ok(1);
+        }
+    };
+
+    println!(
+        "config  {}{}",
+        file.display(),
+        if file.exists() {
+            ""
+        } else {
+            "  (absent, using defaults)"
+        }
+    );
+    println!();
+    // Collected first so the columns can be sized to the content. A fixed width
+    // ran long paths straight into the provenance column, which is the one
+    // thing this table exists to show.
+    let mut rows: Vec<(&str, String, bool)> = Vec::new();
+    let mut row = |name: &'static str, value: String, from_file: bool| {
+        rows.push((name, value, from_file));
+    };
+
+    let accounts = settings.accounts.clone().unwrap_or_default();
+    row(
+        "accounts",
+        if accounts.is_empty() {
+            "(broker chooses by headroom)".to_string()
+        } else {
+            accounts.join(", ")
+        },
+        settings.accounts.is_some(),
+    );
+    row(
+        "strong_model",
+        settings
+            .strong_model
+            .clone()
+            .unwrap_or_else(|| "(codex default)".to_string()),
+        settings.strong_model.is_some(),
+    );
+    row(
+        "cheap_model",
+        settings
+            .cheap_model
+            .clone()
+            .unwrap_or_else(|| "(codex default)".to_string()),
+        settings.cheap_model.is_some(),
+    );
+    row(
+        "broker",
+        settings
+            .broker
+            .clone()
+            .unwrap_or_else(|| DEFAULT_BROKER.to_string()),
+        settings.broker.is_some(),
+    );
+    row(
+        "budget_secs",
+        settings
+            .budget_secs
+            .unwrap_or(DEFAULT_BUDGET_SECS)
+            .to_string(),
+        settings.budget_secs.is_some(),
+    );
+    row(
+        "allow_planner",
+        settings.allow_planner.unwrap_or(false).to_string(),
+        settings.allow_planner.is_some(),
+    );
+    row(
+        "concurrency",
+        settings
+            .concurrency
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "(derived from the budget)".to_string()),
+        settings.concurrency.is_some(),
+    );
+    row(
+        "output_root",
+        settings
+            .output_root
+            .clone()
+            .map(|p| timon::config::expand(&p).display().to_string())
+            .unwrap_or_else(|| timon::config::default_output_root().display().to_string()),
+        settings.output_root.is_some(),
+    );
+    row(
+        "store",
+        settings
+            .store
+            .clone()
+            .map(|p| timon::config::expand(&p).display().to_string())
+            .unwrap_or_else(|| default_run_store().display().to_string()),
+        settings.store.is_some(),
+    );
+    let widest = rows
+        .iter()
+        .map(|(_, value, _)| value.len())
+        .max()
+        .unwrap_or(0);
+    println!(
+        "{:<16}{:<width$}  from",
+        "setting",
+        "in effect",
+        width = widest
+    );
+    for (name, value, from_file) in &rows {
+        println!(
+            "{:<16}{:<width$}  {}",
+            name,
+            value,
+            if *from_file { "config" } else { "default" },
+            width = widest
+        );
+    }
+
+    println!();
+    println!("Flags override all of this. `timon run` still needs --execute to spend.");
+    Ok(0)
+}
+
+/// Whether Timon can take work right now, and what to do if not.
+///
+/// One command rather than four, because the useful question is never "is the
+/// broker up" on its own — it is whether a hand-off typed now would get as far
+/// as doing something.
+fn status() -> Result<u8> {
+    let settings = timon::config::load().unwrap_or_default();
+    let broker = settings
+        .broker
+        .clone()
+        .unwrap_or_else(|| DEFAULT_BROKER.to_string());
+
+    let mut ready = true;
+    println!("broker    {broker}");
+    match broker_health(&broker) {
+        Ok(health) => {
+            let healthy = health["healthy"].as_bool().unwrap_or(false);
+            let usable = health["accounts_usable"].as_u64().unwrap_or(0);
+            let configured = health["accounts_configured"].as_u64().unwrap_or(0);
+            println!(
+                "          {} — {usable} of {configured} account(s) usable",
+                if healthy { "healthy" } else { "UNHEALTHY" }
+            );
+            if let Some(faults) = health["faults"].as_array() {
+                for fault in faults {
+                    println!("          fault: {}", fault.as_str().unwrap_or("?"));
+                }
+            }
+            if !healthy || usable == 0 {
+                ready = false;
+            }
+            if let Some(rejected) = health["accounts_rejected"].as_array() {
+                for name in rejected {
+                    println!("          rejected: {}", name.as_str().unwrap_or("?"));
+                }
+            }
+        }
+        Err(why) => {
+            ready = false;
+            println!("          UNREACHABLE — {why}");
+            println!("          start it with: systemctl status timon-broker");
+        }
+    }
+
+    println!();
+    println!(
+        "writing   {}",
+        if qualification_passes() {
+            "permitted"
+        } else {
+            "NOT permitted"
+        }
+    );
+    if !qualification_passes() {
+        ready = false;
+        println!("          Workers that change files are disabled on this host.");
+        println!("          `timon qualify status` says what is missing.");
+    }
+
+    println!();
+    let store = settings
+        .store
+        .clone()
+        .map(|p| timon::config::expand(&p))
+        .unwrap_or_else(default_run_store);
+    println!("runs      {}", store.display());
+    match timon::run::record::Runs::open(&store) {
+        Ok(runs) => match runs.recent(5) {
+            Ok(recent) if recent.is_empty() => println!("          none yet"),
+            Ok(recent) => {
+                for run in recent {
+                    println!(
+                        "          {}  {:<10}  {}",
+                        run.id,
+                        run.status.as_str(),
+                        run.goal.lines().next().unwrap_or("")
+                    );
+                }
+            }
+            Err(error) => println!("          could not be read: {error}"),
+        },
+        Err(error) => println!("          could not be opened: {error}"),
+    }
+
+    println!();
+    println!("config    {}", timon::config::path().display());
+    println!();
+    println!(
+        "{}",
+        if ready {
+            "Ready. Hand off work with:  timon run \"your goal\" --execute"
+        } else {
+            "Not ready — see the lines marked above."
+        }
+    );
+    Ok(if ready { 0 } else { 1 })
+}
+
+/// Asks the broker how it is. Short timeout: this is a status command, and a
+/// hang is a worse answer than "unreachable".
+fn broker_health(address: &str) -> Result<serde_json::Value, String> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect_timeout(
+        &address
+            .parse()
+            .map_err(|_| format!("{address} is not an address"))?,
+        std::time::Duration::from_secs(2),
+    )
+    .map_err(|error| error.to_string())?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        .ok();
+    write!(
+        stream,
+        "GET {} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n",
+        timon::broker::health::HEALTH_PATH
+    )
+    .map_err(|error| error.to_string())?;
+    let mut raw = String::new();
+    stream
+        .read_to_string(&mut raw)
+        .map_err(|error| error.to_string())?;
+    let body = raw
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or(&raw);
+    serde_json::from_str(body.trim()).map_err(|error| format!("unreadable reply: {error}"))
 }
 
 /// Where the run store lives by default.
@@ -129,9 +589,9 @@ struct HandoffArgs {
     /// should not be the same keystroke.
     #[arg(long)]
     execute: bool,
-    /// Where the broker listens.
-    #[arg(long, default_value = "127.0.0.1:1456")]
-    broker: String,
+    /// Where the broker listens. Defaults to the config, then 127.0.0.1:1456.
+    #[arg(long)]
+    broker: Option<String>,
     /// The worker command for the cheap route. The task goes on stdin.
     #[arg(long, num_args = 1.., value_delimiter = ' ')]
     cheap_command: Option<Vec<std::ffi::OsString>>,
@@ -152,8 +612,8 @@ struct HandoffArgs {
     /// the point at which new work stops, and the depth a plan may reach are
     /// all derived from it, so the worst case *is* the budget rather than
     /// something larger that nobody worked out.
-    #[arg(long, default_value_t = 300)]
-    budget_secs: u64,
+    #[arg(long)]
+    budget_secs: Option<u64>,
     /// Workers at once. Width is nearly free; this is about how much of a
     /// shared host one run should take.
     #[arg(long)]
@@ -854,6 +1314,15 @@ fn run() -> Result<u8> {
         Command::Triage(args) => return triage_show(args),
         Command::Runs(RunsCommand::List(args)) => return runs_list(args),
         Command::Runs(RunsCommand::Show(args)) => return runs_show(args),
+        Command::Config(ConfigCommand::Init) => return config_init(),
+        Command::Config(ConfigCommand::Path) => {
+            println!("{}", timon::config::path().display());
+            return Ok(0);
+        }
+        Command::Config(ConfigCommand::Show) => return config_show(),
+        Command::Status => return status(),
+        Command::Qualify(QualifyCommand::Status) => return qualify_status(),
+        Command::Qualify(QualifyCommand::Accept(args)) => return qualify_accept(args),
         Command::Runs(RunsCommand::Cancel(args)) => return runs_cancel(args),
         Command::Runs(RunsCommand::Recover(args)) => return runs_recover(args),
     };
@@ -1201,8 +1670,16 @@ fn render_run(run: &timon::run::record::Run) -> String {
     out
 }
 
-fn run_start(args: HandoffArgs) -> Result<u8> {
+fn run_start(mut args: HandoffArgs) -> Result<u8> {
     use timon::run::start::{Request, admit};
+
+    // The config fills in whatever the flags did not say. Resolved here, once,
+    // before anything reads `args`, so there is no second place where a default
+    // could disagree with this one.
+    if let Err(why) = apply_config(&mut args) {
+        eprintln!("timon: {why}");
+        return Ok(1);
+    }
 
     let runs = open_runs(args.store.clone())?;
     let workspace = match args.workspace.clone() {
@@ -1256,6 +1733,12 @@ fn run_start(args: HandoffArgs) -> Result<u8> {
     }
 
     if args.execute {
+        // Recorded becomes running at the moment something is actually going to
+        // be sent to a model, so the status reflects which of the two happened.
+        if let Err(error) = runs.settle(&run.id, timon::run::record::Status::Running, now, None) {
+            eprintln!("timon: the run could not be marked running: {error}");
+            return Ok(1);
+        }
         return run_execute(&runs, &run, &decision, &args, now);
     }
 
@@ -1374,7 +1857,30 @@ fn describe_outcome(outcome: &timon::dag_run::Outcome) -> String {
 /// Absent means shut. A host that has never been qualified has not qualified,
 /// and P4.3 exists precisely so that this is not a guess.
 fn qualification_passes() -> bool {
-    let record = std::path::Path::new("eval/results/write-sandbox-2026-09-28.json");
+    qualification_path().is_some()
+}
+
+/// Where this host's write-sandbox qualification was found, if anywhere.
+///
+/// It used to be read from `eval/results/write-sandbox-2026-09-28.json` — a
+/// **relative** path naming a single date. Writing workers were therefore
+/// enabled only when `timon` happened to be invoked from the root of its own
+/// source tree. A developer handing off work in their own repository got a
+/// pipeline that silently could not write, reported tasks it had not run, and
+/// no message explaining why.
+///
+/// Now absolute and under the developer's own Timon directory, with the old
+/// in-tree path still honoured so an existing checkout keeps working.
+fn qualification_path() -> Option<PathBuf> {
+    let candidates = [
+        timon::config::timon_home().join("qualification.json"),
+        PathBuf::from("eval/results/write-sandbox-2026-09-28.json"),
+    ];
+    candidates.into_iter().find(|path| qualified_by(path))
+}
+
+/// Whether one record says this host passed.
+fn qualified_by(record: &std::path::Path) -> bool {
     let Ok(raw) = std::fs::read_to_string(record) else {
         return false;
     };
@@ -1405,7 +1911,7 @@ fn run_execute(
 
     let depth = timon::dag::Limits::default().max_depth;
     let mut budget = Budget::from_total(
-        std::time::Duration::from_secs(args.budget_secs),
+        std::time::Duration::from_secs(args.budget_secs.unwrap_or(DEFAULT_BUDGET_SECS)),
         depth,
         args.concurrency,
     );
@@ -1442,7 +1948,10 @@ fn run_execute(
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let plan = Plan {
-        broker: args.broker.clone(),
+        broker: args
+            .broker
+            .clone()
+            .unwrap_or_else(|| DEFAULT_BROKER.to_string()),
         cancel: std::sync::Arc::clone(&cancel),
         cheap_command: args
             .cheap_command
@@ -1458,7 +1967,11 @@ fn run_execute(
         output_root: args
             .output_root
             .clone()
-            .unwrap_or_else(|| std::env::temp_dir().join("timon-runs")),
+            // Durable, not the system temp directory. `/tmp` was cleared under
+            // a measurement run on this project and took every transcript with
+            // it; those transcripts are also the only record of what a worker
+            // did, which is what anyone reviewing a hand-off needs to read.
+            .unwrap_or_else(timon::config::default_output_root),
         deadline: budget.worker_deadline,
         max_output_bytes: 8 * 1024 * 1024,
         // The grant outlives the worst case by a minute, so authority never

@@ -173,7 +173,11 @@ fn a_finished_run_is_settled_rather_than_left_running() {
     let dir = tempfile::tempdir().unwrap();
     let runs = Runs::open(dir.path().join("runs.sqlite")).unwrap();
     let run = a_run(&runs, "echoed", vec![]);
-    assert_eq!(runs.get(&run.id).unwrap().status, Status::Running);
+    // `admit` records rather than runs: a preflight that said `running` sat in
+    // the status display as work in progress forever. `--execute` is what
+    // promotes it, which is what this test stands in for.
+    assert_eq!(runs.get(&run.id).unwrap().status, Status::Recorded);
+    runs.settle(&run.id, Status::Running, NOW, None).unwrap();
     // Without a broker this cannot proceed, and the run must still not be left
     // claiming to be running.
     let plan = plan("127.0.0.1:1", dir.path());

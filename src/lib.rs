@@ -9,6 +9,7 @@ pub mod attempt;
 pub mod bridge;
 pub mod broker;
 pub mod budget;
+pub mod config;
 pub mod dag;
 pub mod dag_inputs;
 pub mod dag_run;

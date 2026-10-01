@@ -40,7 +40,10 @@ fn a_hand_off_records_a_run_and_says_how_to_find_it_later() {
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].goal, "tidy the changelog");
     assert_eq!(recorded[0].principal_uid, 1000);
-    assert_eq!(recorded[0].status, Status::Running);
+    // Recorded, not running: this tool records a hand-off and nothing here
+    // sends anything to a model. Saying `running` left every hand-off sitting
+    // in the status display as work in progress that would never move.
+    assert_eq!(recorded[0].status, Status::Recorded);
 
     // The session is told the id, because a run it cannot find again is a run
     // the developer has lost.
