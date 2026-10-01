@@ -137,7 +137,11 @@ def run_single(task, arm, model, args, out):
 def run_pipeline(task, args, out):
     """The whole route: triage, planner, workers, integration, verification."""
     run_out = Path(out) / f"{task['id']}-pipeline"
-    run_out.mkdir(parents=True, exist_ok=True)
+    # 0700: a worker refuses an output directory that group or others can read,
+    # which is right — its output can contain whatever it was working on. The
+    # default umask here gives 0755 and the run fails before it starts.
+    run_out.mkdir(parents=True, exist_ok=True, mode=0o700)
+    run_out.chmod(0o700)  # exist_ok could have found one left at 0755
     command = [
         args.timon, "run", task["goal"], "--execute",
         "--store", str(Path(out) / "runs.sqlite"),
@@ -268,7 +272,9 @@ def main():
 
     args.suite_data = json.load(open(args.suite))
     out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # mkdir's mode is masked by the umask, so set it explicitly as well.
+    out.chmod(0o700)
 
     chosen = args.suite_data["tasks"]
     if args.task:
