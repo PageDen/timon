@@ -410,13 +410,19 @@ fn slot_is_released_when_holding_process_exits() {
     );
     drop(pool.try_acquire().unwrap());
 
-    // Another process holds the slot, then exits.
-    let script = format!(
-        "exec 9>>{}; flock -n 9 || exit 1; sleep 0.5",
-        pool.slot_path(0).display()
-    );
-    let mut holder = std::process::Command::new("/bin/sh")
-        .args(["-c", &script])
+    // Another process holds the slot, then exits. Through Perl's flock, which
+    // is the same flock(2) Timon uses, rather than the `flock` command: that
+    // ships with Linux but not macOS, where the helper failed to start, nobody
+    // held the slot, and the test reported a slot that was free as a bug.
+    let mut holder = std::process::Command::new("perl")
+        .args([
+            "-MFcntl=:flock",
+            "-e",
+            "open(my $f, '>>', $ARGV[0]) or exit 2; \
+             flock($f, LOCK_EX | LOCK_NB) or exit 1; \
+             select(undef, undef, undef, 0.5);",
+        ])
+        .arg(pool.slot_path(0))
         .spawn()
         .unwrap();
     std::thread::sleep(Duration::from_millis(200));
