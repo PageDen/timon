@@ -181,3 +181,131 @@ fn an_unknown_group_is_refused_before_anything_is_created() {
     assert!(result.is_err());
     assert!(!shared.exists(), "nothing is left half-made");
 }
+
+/// Per-user fairness: the host limit stops the machine being overloaded and
+/// says nothing about whose work is on it. Codex's review asked for this and
+/// `TODO.md` recorded it as not built.
+mod fairness {
+    use std::num::NonZeroU16;
+    use timon::worker::slots::{SlotError, SlotMode, SlotPool};
+
+    const ALICE: u32 = 1000;
+    const BOB: u32 = 1001;
+
+    fn pool(dir: &std::path::Path, limit: u16, per_user: u16) -> SlotPool {
+        SlotPool::new(
+            dir,
+            NonZeroU16::new(limit).unwrap(),
+            SlotMode::CreateMissing,
+        )
+        .per_user(NonZeroU16::new(per_user).unwrap())
+    }
+
+    #[test]
+    fn one_user_cannot_take_every_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = pool(dir.path(), 4, 2);
+
+        let _first = pool.try_acquire_as(ALICE).expect("first");
+        let _second = pool.try_acquire_as(ALICE).expect("second");
+
+        // Two host slots are still free, and Alice may not have them.
+        match pool.try_acquire_as(ALICE) {
+            Err(SlotError::YoursFull { uid, cap }) => {
+                assert_eq!((uid, cap), (ALICE, 2));
+            }
+            other => panic!("expected Alice to be at her cap, got {other:?}"),
+        }
+    }
+
+    /// The point of the whole thing: the slots Alice was refused are available
+    /// to somebody else, rather than being idle because she asked first.
+    #[test]
+    fn slots_refused_to_one_user_are_still_there_for_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = pool(dir.path(), 4, 2);
+
+        let _a1 = pool.try_acquire_as(ALICE).expect("alice 1");
+        let _a2 = pool.try_acquire_as(ALICE).expect("alice 2");
+        assert!(pool.try_acquire_as(ALICE).is_err(), "alice is capped");
+
+        let _b1 = pool.try_acquire_as(BOB).expect("bob 1");
+        let _b2 = pool.try_acquire_as(BOB).expect("bob 2");
+        assert!(pool.try_acquire_as(BOB).is_err(), "bob is capped too");
+    }
+
+    /// `Full` and `YoursFull` are different situations and must not be confused:
+    /// one says wait, the other says your own work is the reason.
+    #[test]
+    fn a_busy_host_is_reported_differently_from_a_capped_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = pool(dir.path(), 2, 2);
+
+        let _a1 = pool.try_acquire_as(ALICE).expect("alice 1");
+        let _a2 = pool.try_acquire_as(ALICE).expect("alice 2");
+
+        // Alice holds both host slots, so Bob meets a full host, not a cap.
+        match pool.try_acquire_as(BOB) {
+            Err(SlotError::Full) => {}
+            other => panic!("expected a full host for Bob, got {other:?}"),
+        }
+        assert!(
+            format!("{}", SlotError::Full).contains("all worker slots"),
+            "the host message does not blame the caller"
+        );
+        let mine = SlotError::YoursFull { uid: ALICE, cap: 2 };
+        assert!(
+            format!("{mine}").contains("other slots may be free"),
+            "the per-user message does not say the host may have room"
+        );
+    }
+
+    /// Releasing a lease returns both slots. Returning the host slot but not the
+    /// user's own would leave a caller at their cap holding nothing — a slow
+    /// leak into permanent refusal.
+    #[test]
+    fn releasing_a_lease_returns_the_users_own_slot_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = pool(dir.path(), 4, 1);
+
+        let first = pool.try_acquire_as(ALICE).expect("first");
+        assert_eq!(first.user_index(), Some(0));
+        assert!(pool.try_acquire_as(ALICE).is_err(), "capped at one");
+
+        drop(first);
+        let again = pool.try_acquire_as(ALICE).expect("the cap was released");
+        assert_eq!(again.user_index(), Some(0), "the same user slot came back");
+    }
+
+    #[test]
+    fn without_a_cap_nothing_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = SlotPool::new(
+            dir.path(),
+            NonZeroU16::new(3).unwrap(),
+            SlotMode::CreateMissing,
+        );
+
+        let held: Vec<_> = (0..3)
+            .map(|i| {
+                pool.try_acquire_as(ALICE)
+                    .unwrap_or_else(|e| panic!("slot {i}: {e}"))
+            })
+            .collect();
+        assert_eq!(held.len(), 3, "one uid may still fill the host");
+        assert!(held.iter().all(|lease| lease.user_index().is_none()));
+        assert!(matches!(pool.try_acquire_as(ALICE), Err(SlotError::Full)));
+    }
+
+    /// A cap above the host limit is allowed and simply never binds. An operator
+    /// sizing a host should not have to work out which of two numbers wins.
+    #[test]
+    fn a_cap_above_the_host_limit_is_harmless() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = pool(dir.path(), 2, 50);
+
+        let _a = pool.try_acquire_as(ALICE).expect("first");
+        let _b = pool.try_acquire_as(ALICE).expect("second");
+        assert!(matches!(pool.try_acquire_as(ALICE), Err(SlotError::Full)));
+    }
+}

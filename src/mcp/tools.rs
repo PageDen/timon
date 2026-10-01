@@ -142,6 +142,15 @@ piece yourself."
                     true,
                 );
             }
+            Err(error @ SlotError::YoursFull { .. }) => {
+                return (
+                    format!(
+                        "{error}. Wait for one of your own workers to finish, or do this \
+piece yourself."
+                    ),
+                    true,
+                );
+            }
             Err(error) => return (format!("A worker slot could not be taken: {error}"), true),
         },
         None => None,
