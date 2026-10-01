@@ -436,7 +436,41 @@ report, and reads both shapes.
 
 A second fault alongside it: all three repeats shared one output directory, so
 two of the three reports were overwritten and only the last could be re-read.
-Both are fixed; neither changes what was spent.
+
+A third, in the reporter: `verdict.outcome` is a tagged object on the planner
+route — `{"outcome": "repairable", "defect": "…"}` — not a string, and the
+reporter raised `AttributeError` on the first real data it ever saw. Faults 7, 8
+and 9 in this project. All three are fixed; none changes what was spent.
+
+### Every session, so a rate never hides a case
+
+| pair | arm | established | tokens | secs | over |
+|---|---|---|---|---|---|
+| p1-0 | pipeline | 6/6 | 45,985 | 74.5 | 0 |
+| p1-0 | strong | 6/6 | 33,382 | 39.2 | 0 |
+| p1-0 | cheap | 6/6 | 30,425 | 49.2 | 0 |
+| p1-1 | pipeline | 6/6 | 109,076 | 109.5 | 0 |
+| p1-1 | strong | 6/6 | 35,008 | 38.9 | 0 |
+| p1-1 | cheap | 6/6 | 42,151 | 63.0 | 0 |
+| p1-2 | pipeline | 6/6 | 149,904 | 87.6 | 0 |
+| p1-2 | cheap | 6/6 | 23,410 | 45.4 | 0 |
+
+`p1-2`'s strong arm is the session the ceiling refused.
+
+### The pipeline under-claimed twice, which is the error to prefer
+
+Gate 1 asks only about claiming *more* than was done, and nothing did. But two of
+the three runs reported `repairable` while all six registered criteria held.
+
+The reason is worth keeping: the planner wrote itself **seven** criteria where the
+registration gives six, including the exact phrase *"Continuity, then Capability,
+then Headroom"*, and then honestly reported a defect when its own stricter
+criterion was unmet. The verifier was telling the truth about a harder test than
+the one it was being scored against.
+
+A verifier that cries defect on good work still costs a developer a review pass,
+so it is recorded rather than waved through. But of the two directions an
+inaccurate verdict can take, this is the one to want.
 
 ### The gates, on rescored data
 
@@ -509,119 +543,3 @@ produces work that satisfies every registered criterion — three times out of
 three. Gates 1 and 3 pass on real data. The budget bound held under concurrency
 for the first time.
 
-## Stage one — 2026-10-01 — `p1`, 3 repeats, `acct3`
-
-Binary `b820dc9` built `--release`, because gate 3 is a wall-clock bound and
-measuring a debug build against a 300-second budget would test the compiler.
-Strong `gpt-5.6-luna`, cheap `gpt-5.5`, assigned by Chris.
-
-| pair | arm | established | tokens | secs | over |
-|---|---|---|---|---|---|
-| p1-0 | pipeline | 6/6 | 45,985 | 74.5 | 0 |
-| p1-0 | strong | 6/6 | 33,382 | 39.2 | 0 |
-| p1-0 | cheap | 6/6 | 30,425 | 49.2 | 0 |
-| p1-1 | pipeline | 6/6 | 109,076 | 109.5 | 0 |
-| p1-1 | strong | 6/6 | 35,008 | 38.9 | 0 |
-| p1-1 | cheap | 6/6 | 42,151 | 63.0 | 0 |
-| p1-2 | pipeline | 6/6 | 149,904 | 87.6 | 0 |
-| p1-2 | cheap | 6/6 | 23,410 | 45.4 | 0 |
-
-**469,341 tokens over 8 sessions. The ceiling stopped the ninth** — `p1-2`'s
-strong arm — and it did not continue and did not switch accounts. The stop rule
-works; it is the only thing in this document that had never been exercised.
-
-### Gate 1 — PASS
-
-No run claimed `done` or `pass` without its registered criteria holding.
-
-Two of the three **under-claimed**, which is the opposite error and not a gate-1
-failure. The planner wrote itself *seven* criteria for a task the registration
-gives six, including the exact phrase *"Continuity, then Capability, then
-Headroom"*, and then honestly reported `repairable` because its own stricter
-criterion was unmet while all six registered ones held. A verifier that cries
-defect on good work costs a developer a review pass, so it is recorded — but it
-is the failure mode to prefer.
-
-### Gate 3 — PASS
-
-Maximum overrun zero. The worst run used 109.5s of a 300s budget. The budget
-claim had never been tested end to end under concurrency; it holds.
-
-### Gate 2 — INCONCLUSIVE by the rule, and the rule is not the finding
-
-**Every arm scored 6/6 on every run.** The registered statistic is therefore
-1.000 against 1.000 with identical interquartile ranges, which the registration
-requires be called inconclusive.
-
-But the honest reading is the cheap arm's: **`p1` is too easy to distinguish
-anything.** A single cheap call established all six criteria, three times out of
-three. That is exactly the signal the cheap arm was registered to produce —
-*"if a cheap call establishes as many criteria as the pipeline on these tasks,
-the suite is too easy and the gate says so."* It said so.
-
-### Gate 4 — FAIL, and confounded
-
-| | tokens per established criterion |
-|---|---|
-| pipeline | 18,179 |
-| strong | 5,699 |
-| **ratio** | **3.190** against a margin of 2.0 |
-
-A real failure on the registered statistic. It is also predictable on a task
-where every arm delivers the same six criteria: with the denominator identical,
-cost per unit delivered reduces to raw cost, and the planner path spends a
-planner call plus two workers plus a judge to reach what one cheap call reached.
-**This number should not be read as "the planner path costs 3.2× too much."** It
-should be read as "on work a cheap call does perfectly, the planner path costs
-3.2× more", which is a statement about the suite as much as the route.
-
-### What stage one actually bought
-
-Three more instrument faults, all on first contact with real data, and all in
-code I had already called validated:
-
-1. **The result branch was never read.** The planner route emits a flat object
-   with `result_branch`; the runner read `report["run"]["branch"]`, the
-   single-worker shape. Branch was `None` every time, nothing was checked out,
-   and **every pipeline run was recorded as 0 of 6** while the branches on disk
-   each held 6 of 6. A confident wrong number rather than a refusal.
-2. **Repeats overwrote each other.** `run_out` was keyed by task and not by
-   repeat, so `stdout.json` and `stderr.log` survived only for the last of three
-   runs. The token sums escaped only because they were already scoped by run id.
-3. **The reporter crashed on the verdict.** `verdict.outcome` is a tagged object
-   on the planner route, not a string, and `.lower()` raised on the first real
-   data the reporter ever saw. At least this one was loud.
-
-Faults 7, 8 and 9 in this project. **Re-scoring cost a git checkout**, because
-the result branches were kept — the same reason the P2 gate's three faults cost
-nothing. `eval/rescore-gate-p6.py` recovered all three runs from their branches.
-
-And one flaw in the suite itself, found by reading the plan the planner produced:
-
-4. **The suite does not test dependency handling, though it claims to.** The
-   planner emitted `depends_on: []` for both of `p1`'s tasks with a note that
-   they are independent, and it was right: `p1`'s goal names `docs/selection.md`,
-   so the index task never needed the first deliverable's *output*. The same
-   holds for `p2`, whose summary needs values both tasks can read from source,
-   and `p4`, whose goal states both account names. **All five criteria marked
-   `dependency: true` are satisfiable by two independent workers reading the same
-   source.** The suite's own `purpose` field asserts otherwise and is wrong.
-
-There is a structural reason, worth stating because it constrains any fix: a
-criterion that is **fixed in advance** and **mechanically checkable** cannot
-depend on a free choice a worker makes at runtime. A cross-file consistency rule
-— every `##` heading in A also appears in B — would be checkable, fixed as a
-rule, and genuinely require B to read A. **It is not applied here.** Stage one's
-behaviour has now been seen, so changing the criteria would be adapting the test
-to the result, which is the fault this document exists to prevent.
-
-### Recommendation: do not run stage two as designed
-
-Stage two would spend roughly 2M more tokens to measure a suite that cannot
-separate the arms on its easiest task. What is needed first is tasks where a
-single cheap call does *not* score 6/6 — the planner path's claimed territory —
-and, if dependency handling is to be tested at all, a criterion kind that can
-express it.
-
-Stage one cost 469,341 tokens and 25 minutes to establish that. The full gate
-would have cost five times as much to establish the same thing.
