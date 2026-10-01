@@ -110,6 +110,18 @@ sandboxing.
 
 ## Operational
 
+**Fixed 2026-10-01: workers ran with whatever sandbox the developer's Codex
+config said.** Single-worker routes passed no `-s`, so they inherited this host's
+`sandbox_mode = "danger-full-access"`: the run that wrote a file had the whole
+disk and stayed in its worktree only because it started there. The planner path
+passed `workspace-write` for writing tasks but nothing for itself or for reading
+tasks. And `[sandbox_workspace_write] network_access = true` in the same config
+gave writing workers the network while the qualification record said
+`reach_git_remote: blocked`. Every worker now states its sandbox and has network
+pinned off, and a single worker writes only when the host is qualified, the rule
+the planner path already followed.
+
+
 **Fixed 2026-10-01: a cancel from another terminal now reaches the worker.**
 `timon runs cancel` wrote `cancelling` to the record and revoked the grant, so
 nothing new was authorised, but the turn already running carried on in a process
@@ -168,14 +180,20 @@ They still cannot exceed the host limit, which is provisioned and not theirs to
 touch. This is fairness against runaway work, not a boundary against someone
 determined to take more, and nothing here should be read as the latter.
 
-**Settled 2026-10-01: both candidate models serve on `acct3`.** `gpt-5.6-luna`
-and `gpt-5.5` were each called once through the broker pinned to `acct3` and both
-answered, for 12,618 tokens total. The capability worry from the `go` plan does
-not apply to either on this account today. The plan *name* could not be read from
-a developer login, because the store is `0700` owned by `timon-broker` — the
-service-account fix working as intended. Which of the two is the stronger model
-is still unknown and is not safe to assume: the pipeline gate's runner requires
-both names explicitly and refuses to start if they are equal.
+**Withdrawn 2026-10-01: "both candidate models serve on `acct3`."** That claim
+was wrong, and so was every statement that a `timon run` was paid by the pooled
+accounts. `timon run` gave each worker its grant in `TIMON_GRANT` but never told
+Codex where the broker was; the design assumed a provider in the developer's
+Codex config, and none was ever installed. So workers called OpenAI directly on
+the `workbench` user's own login: the broker forwarded nothing
+(`requests_forwarded: 0` after a run) and the transcript said `provider: openai`.
+The two model probes, gate stage one's 469,341 tokens, and every hand-off before
+this fix were spent on that login, not on acct2 or acct3. What the probes do show
+is that both models answer on *that* login. Whether `prolite` on acct3 serves
+them is again **unverified**. Fixed by passing the broker as the provider on
+every worker's command line; the first run after the fix moved the broker's
+forwarded count from 0 to 6 and its transcript said `provider: timon`. The P2
+gate is not affected: its script wrote its own provider config.
 
 **`acct3`'s plan is still settling.** It reported `go`, then `plus` with a 5-hour
 window, then `prolite` with a 7-day one, over about twenty minutes on

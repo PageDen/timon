@@ -332,6 +332,15 @@ built and validated at zero spend. What is needed from Chris:
 
 ### Settled 2026-10-01: both candidate models serve on `acct3`
 
+> **Withdrawn the same day.** These probes, and gate stage one below, never went
+> through the broker. `timon run` gave workers a grant but no provider pointing
+> at the broker, so every call went straight to OpenAI on the `workbench` user's
+> own login. The probes show both models answer on *that* login; whether they
+> serve on acct3 is unverified. The stage-one spend was on that login too, not
+> on acct3, so the account ceiling and attribution sections of this document
+> describe the wrong account. The gate's measurements of the pipeline itself are
+> unaffected, since every arm used the same login. See `TODO.md`.
+
 The models endpoint lies about capability, so this was answered by calling them.
 One trivial request each — *"Reply with the single word: ok"* — pinned to
 `acct3` through the running broker:
@@ -405,7 +414,7 @@ a true 1.129.
 
 ## Stage one — 2026-10-01 — the suite cannot answer the question
 
-Ran `--task p1`, three repeats, on `acct3`, `gpt-5.6-luna` as strong and
+Ran `--task p1`, three repeats, nominally on `acct3` (in fact on the `workbench` login; see the withdrawal above), `gpt-5.6-luna` as strong and
 `gpt-5.5` as cheap, binary `b820dc9` built `--release`. **It stopped itself at
 the ceiling after 8 of 9 sessions: 469,341 tokens against a ceiling of 400,000.**
 

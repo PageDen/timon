@@ -2050,43 +2050,39 @@ fn run_execute(
     }
     eprintln!("timon run: {}", budget.describe());
 
-    let default_command = |model: Option<&String>, writes: bool| -> Vec<std::ffi::OsString> {
-        // `codex exec` reading its task from stdin. The task never goes in the
-        // arguments, where every account on the host could read it from a
-        // process listing.
-        let mut command: Vec<std::ffi::OsString> = vec!["codex".into(), "exec".into()];
-        if let Some(model) = model {
-            command.push("-m".into());
-            command.push(model.into());
-        }
-        if writes {
-            // The write sandbox, which P4.3 qualified. Its writable root is the
-            // worker's own worktree, because that is where it is started.
-            command.push("-s".into());
-            command.push("workspace-write".into());
-        }
-        command.push("--skip-git-repo-check".into());
-        command.push("-".into());
-        command
+    // Every worker command names the broker as its provider and states its
+    // sandbox. See `worker_command` for why neither is left to the developer's
+    // own Codex configuration.
+    let broker = args
+        .broker
+        .clone()
+        .unwrap_or_else(|| DEFAULT_BROKER.to_string());
+    let default_command = |model: Option<&String>, sandbox| {
+        timon::run::execute::worker_command(&broker, model.map(String::as_str), sandbox)
     };
+    use timon::run::execute::Sandbox;
 
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let plan = Plan {
-        broker: args
-            .broker
-            .clone()
-            .unwrap_or_else(|| DEFAULT_BROKER.to_string()),
+        broker: broker.clone(),
         cancel: std::sync::Arc::clone(&cancel),
         cheap_command: args
             .cheap_command
             .clone()
-            .unwrap_or_else(|| default_command(args.cheap_model.as_ref(), false)),
+            .unwrap_or_else(|| default_command(args.cheap_model.as_ref(), Sandbox::ReadOnly)),
         strong_command: args
             .strong_command
             .clone()
-            .unwrap_or_else(|| default_command(args.strong_model.as_ref(), false)),
-        write_command: default_command(args.strong_model.as_ref(), true),
+            .unwrap_or_else(|| default_command(args.strong_model.as_ref(), Sandbox::ReadOnly)),
+        write_command: default_command(args.strong_model.as_ref(), Sandbox::WorkspaceWrite),
+        // An operator who supplied their own cheap command owns it for writing
+        // too; otherwise the cheap model gets the write sandbox like the strong.
+        cheap_write_command: args
+            .cheap_command
+            .clone()
+            .unwrap_or_else(|| default_command(args.cheap_model.as_ref(), Sandbox::WorkspaceWrite)),
+        writing_permitted: qualification_passes(),
         cheap_model: args.cheap_model.clone(),
         strong_model: args.strong_model.clone(),
         output_root: args
@@ -2223,6 +2219,15 @@ against its own criteria can make correct work worse."
                     println!("{}  {}", executed.run_id, executed.status.as_str());
                     println!("  route       {}", executed.route.as_str());
                     println!("  authority   {}", executed.grant_id);
+                    println!("  sandbox     {}", executed.sandbox.as_str());
+                    if executed.sandbox == timon::run::execute::Sandbox::ReadOnly
+                        && !qualification_passes()
+                    {
+                        println!(
+                            "              writing is not permitted on this host, so the \
+                             worker could not change files. `timon qualify status` says why."
+                        );
+                    }
                     match &executed.branch {
                         Some(branch) => println!("  branch      {branch}"),
                         None => println!("  branch      none — the worker changed no files"),
